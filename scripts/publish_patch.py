@@ -1,4 +1,4 @@
-"""Runs only in the private repository. Public output is manifest.json alone."""
+"""Runs in the updater repository. Patch feed output is manifest.json alone."""
 from __future__ import annotations
 
 import argparse

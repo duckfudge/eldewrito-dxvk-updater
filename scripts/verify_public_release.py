@@ -7,7 +7,6 @@ import io
 import json
 import re
 import sys
-import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -52,15 +51,11 @@ def main():
         assert names == {"README.md", "d3d9.dll", "dxvk.conf", "eldorado.dxvk-cache"}, names
     latest = json.loads(read(API + "/releases/latest"))["tag_name"]
     assert not latest.startswith("updater-v")
-    try:
-        read("https://api.github.com/repos/duckfudge/eldewrito-dxvk-updater")
-    except urllib.error.HTTPError as exc:
-        assert exc.code == 404
-    else:
-        raise AssertionError("Application source must not be anonymously accessible")
+    source_repo = json.loads(read("https://api.github.com/repos/duckfudge/eldewrito-dxvk-updater"))
+    assert source_repo["private"] is False and source_repo["visibility"] == "public"
     result = {"result": "passed", "release": release["html_url"], "sha256": digest,
               "bytes": archive.stat().st_size, "latest_patch_release": latest,
-              "public_source_archive": sorted(names), "private_source_anonymous_access": "404"}
+              "public_source_archive": sorted(names), "source_repository_visibility": "public"}
     (ROOT / "build").mkdir(exist_ok=True)
     (ROOT / "build" / "public-release-audit.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(result, indent=2))
