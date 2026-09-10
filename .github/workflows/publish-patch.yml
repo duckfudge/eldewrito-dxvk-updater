@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   publish:
-    if: github.event.repository.private == true
+    if: github.repository == 'duckfudge/eldewrito-dxvk-updater'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
