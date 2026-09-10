@@ -81,7 +81,8 @@ def test_remote_cache_update_replaces_local_cache(game, client, manifest, payloa
     engine = installer(game, client)
     engine.install(manifest)
     (game / "eldorado.dxvk-cache").write_bytes(b"DXVKlocal changes")
-    payloads["eldorado.dxvk-cache"] = b"DXVKnew shared cache"
+    import struct
+    payloads["eldorado.dxvk-cache"] = struct.pack("<4sII", b"DXVK", 17, 0)
     updated = make_manifest("b" * 40, payloads, "cache update")
     engine.install(updated)
     assert (game / "eldorado.dxvk-cache").read_bytes() == payloads["eldorado.dxvk-cache"]
@@ -192,6 +193,27 @@ def test_damaged_backup_stops_restore_before_changes(game, client, manifest):
     assert snapshot(game) == before
 
 
+def test_completed_update_can_open_even_if_old_backup_is_damaged(game, client, manifest, payloads, monkeypatch):
+    (game / "d3d9.dll").write_bytes(b"original")
+    engine = installer(game, client)
+    original = Store.save_state
+    def commit_then_crash(store, state):
+        original(store, state)
+        raise KeyboardInterrupt("termination after commit")
+    monkeypatch.setattr(Store, "save_state", commit_then_crash)
+    with pytest.raises(KeyboardInterrupt):
+        engine.install(manifest)
+    monkeypatch.setattr(Store, "save_state", original)
+    transaction = engine.store.state()["transaction_id"]
+    (engine.store.tx_path(transaction) / "before" / "d3d9.dll").write_bytes(b"damaged")
+    engine.recover()
+    assert not engine.store.journal_path.exists()
+    assert engine.check(manifest).kind == "current"
+    with pytest.raises(UpdaterError, match="damaged"):
+        engine.restore()
+    assert snapshot(game) == payloads
+
+
 def test_lock_excludes_second_instance(game, client, manifest):
     first, second = installer(game, client), installer(game, client)
     with first.store.lock():
@@ -224,6 +246,64 @@ def test_file_modified_while_staging_aborts(game, client, manifest, monkeypatch)
     with pytest.raises(UpdaterError, match="changed while preparing"):
         engine.install(manifest)
     assert not (game / "d3d9.dll").exists()
+    assert list(engine.store.transactions.iterdir()) == []
+
+
+def test_large_local_cache_can_be_backed_up_and_restored(game, client, manifest):
+    from dxvk_updater.model import MAX_SIZES, sha256_file
+    cache = game / "eldorado.dxvk-cache"
+    with cache.open("wb") as stream:
+        stream.write(b"DXVK")
+        stream.truncate(MAX_SIZES[cache.name] + 1)
+    original_hash = sha256_file(cache)
+    engine = installer(game, client)
+    engine.install(manifest, repair=True)
+    engine.restore()
+    assert cache.stat().st_size == MAX_SIZES[cache.name] + 1
+    assert sha256_file(cache) == original_hash
+
+
+def test_adoption_after_restore_keeps_new_restore_point(game, client, manifest, payloads):
+    # Repair a manually installed patch without first adopting it, then restore.
+    for name, data in payloads.items():
+        (game / name).write_bytes(data)
+    engine = installer(game, client)
+    engine.install(manifest, repair=True)
+    engine.restore()
+    restore_id = engine.store.state()["transaction_id"]
+    assert engine.check(manifest).can_restore
+    assert engine.store.state()["transaction_id"] == restore_id
+    engine.restore()
+    assert snapshot(game) == payloads
+
+
+def test_backup_failure_discards_unstarted_transaction(game, client, manifest, monkeypatch):
+    (game / "d3d9.dll").write_bytes(b"original")
+    engine = installer(game, client)
+    def fail_backup(source, target):
+        raise PermissionError("disk full")
+    monkeypatch.setattr(module, "atomic_copy", fail_backup)
+    with pytest.raises(PermissionError):
+        engine.install(manifest)
+    assert list(engine.store.transactions.iterdir()) == []
+    assert (game / "d3d9.dll").read_bytes() == b"original"
+
+
+def test_rollback_cleanup_failure_does_not_report_incomplete_recovery(game, client, manifest, monkeypatch):
+    engine = installer(game, client)
+    original = module.atomic_copy
+    def fail_install(source, target):
+        if target == game / "dxvk.conf":
+            raise PermissionError("locked")
+        original(source, target)
+    def fail_cleanup(transaction):
+        raise PermissionError("cleanup locked")
+    monkeypatch.setattr(module, "atomic_copy", fail_install)
+    monkeypatch.setattr(engine.store, "remove_transaction", fail_cleanup)
+    with pytest.raises(UpdaterError, match="previous files were restored"):
+        engine.install(manifest)
+    assert all(value is None for value in snapshot(game).values())
+    assert not engine.store.journal_path.exists()
 
 
 def test_symlink_target_is_rejected(game, client, manifest, tmp_path):

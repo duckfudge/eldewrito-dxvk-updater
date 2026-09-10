@@ -1,5 +1,6 @@
+import struct
+
 import pytest
-from dxvk_updater.demo import demo_payloads
 from dxvk_updater.model import make_manifest
 
 
@@ -13,7 +14,20 @@ def game(tmp_path):
 
 @pytest.fixture
 def payloads():
-    return demo_payloads()
+    # A synthetic PE image with one complete section; never loaded or executed.
+    dll = bytearray(1024)
+    dll[:2] = b"MZ"
+    struct.pack_into("<I", dll, 0x3C, 0x80)
+    dll[0x80:0x84] = b"PE\0\0"
+    struct.pack_into("<HH", dll, 0x84, 0x14C, 1)
+    struct.pack_into("<HH", dll, 0x94, 224, 0x2002)
+    struct.pack_into("<H", dll, 0x98, 0x10B)
+    struct.pack_into("<I", dll, 0xD4, 512)  # SizeOfHeaders
+    section = 0x98 + 224
+    dll[section:section+8] = b".text\0\0\0"
+    struct.pack_into("<II", dll, section + 16, 512, 512)
+    return {"d3d9.dll": bytes(dll), "dxvk.conf": b"dxvk.hud = 0\n",
+            "eldorado.dxvk-cache": struct.pack("<4sII", b"DXVK", 18, 0)}
 
 
 @pytest.fixture
