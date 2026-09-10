@@ -2,8 +2,9 @@
 
 ## One-time repository setup
 
-1. Keep `duckfudge/eldewrito-dxvk-updater` **private**. Keep all Python source and
-   workflow YAML here, never in the public patch repository.
+1. `duckfudge/eldewrito-dxvk-updater` is **public** at the owner's request. Keep
+   application source and workflow YAML here; patch files and player downloads
+   remain in `duckfudge/eldewrito-dxvk`.
 2. In `duckfudge/eldewrito-dxvk/main`, place the verified x86 `d3d9.dll` from the
    `0525` release next to the existing `dxvk.conf` and `eldorado.dxvk-cache`.
    Preserve the current config/cache rather than replacing them with older ZIP
@@ -12,8 +13,8 @@
 3. Create a fine-grained GitHub token owned by duckfudge, restricted to the public
    `eldewrito-dxvk` repository. Grant **Contents: read and write** only (Metadata
    read is automatic). Set a 90-day expiry and record the renewal date privately.
-   It needs no access to the private application's source repository.
-4. In this private repository's Actions secrets, save it as `PUBLISH_TOKEN`.
+   It needs no access to the application's source repository.
+4. In this repository's Actions secrets, save it as `PUBLISH_TOKEN`.
    Do not put it in an issue, source file, build artifact, command-line argument,
    or public repository. Renew the secret before its token expires.
 5. Run **Publish patch feed** with `dry_run` selected. Confirm validation succeeds,
@@ -24,8 +25,10 @@
 
 The built-in workflow token cannot write a different repository. `PUBLISH_TOKEN`
 supplies the public repository permission; it is only passed to publishing steps.
-The private source checkout uses its own read-only workflow token and disables
-credential persistence. No public workflow needs to read the private source.
+The source checkout uses its own read-only workflow token and disables credential
+persistence. Workflows are restricted to the canonical updater repository.
+Pull-request builds never receive `PUBLISH_TOKEN`; publishing requires a maintainer
+tag, a manual run, or the scheduled patch check.
 
 The initial token, **ElDewrito DXVK Publisher**, expires **December 10, 2026**.
 Renew it and replace the private `PUBLISH_TOKEN` secret before that date.
@@ -34,7 +37,7 @@ Renew it and replace the private `PUBLISH_TOKEN` secret before that date.
 
 Edit/upload one or more of the three patch files on public `main`. Commit a
 compatible file set together when changes depend on one another. Within the next
-scheduled run, the private publisher validates the files and updates the public
+scheduled run, the publisher validates the files and updates the public
 feed. GitHub may delay scheduled jobs; use **Run workflow** to publish sooner.
 
 The publisher generates the patch ID and checksums, so there is no version number
@@ -58,8 +61,9 @@ then publishes it with `make_latest=false`. The latest DXVK patch release is not
 changed. A released version is never overwritten. If upload fails, review and
 remove the incomplete draft before retrying, or publish a new version.
 
-Private repository source archives stay private. GitHub's automatic source archives
-on the public binary release refer to the public patch repository, not this one.
+Application source archives are publicly available from this repository. GitHub's
+automatic archives on the binary release refer to the patch repository. Packaged
+player ZIPs continue to exclude application source and credentials.
 
 ## Revert a bad patch
 
@@ -71,7 +75,7 @@ waiting. Application downgrade decisions are never inferred from commit hashes.
 ## Failures and support
 
 - HTTP 401/403: check token expiry, repository selection, Contents write permission,
-  and branch rules. No permission to private source is necessary for the publisher.
+  and branch rules. No permission to application source is necessary for the publisher.
 - Invalid DLL/config/cache: fix the public files and rerun; the previous manifest
   remains live. Git LFS pointer text cannot be distributed as a patch file.
 - Non-fast-forward publication: another publication won the race. Rerun against
@@ -95,8 +99,8 @@ No telemetry or automatic log uploads are included.
 Run `python scripts/smoke_live.py` to exercise the live patch in a newly created
 synthetic game folder under `build/live-smoke`. It never executes the fixture's
 game marker. Run `python scripts/verify_public_release.py` to download and audit
-the released ZIP, checksum, asset list, public source archive, private repository
-anonymous access, and latest patch release. These scripts need network access
+the released ZIP, checksum, asset list, patch source archive, public application
+repository visibility, and latest patch release. These scripts need network access
 but no publishing credential. Outputs and test fixtures stay under `build`/`dist`.
 
 When releasing a newer application, update its download link in the public README.

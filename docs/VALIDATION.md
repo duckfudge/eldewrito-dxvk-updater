@@ -3,6 +3,15 @@
 Validated September 10, 2026 UTC. This record distinguishes completed checks from
 remaining platform validation.
 
+The source repository was subsequently made **public** at the owner's request.
+The private-access checks below describe the initial deployment. The current
+release audit expects public source visibility, and workflows use a canonical
+repository check so publishing continues with public source. Credentials remain
+in Actions secrets and are excluded from pull-request builds and application ZIPs.
+After the visibility change, the public release audit passed, including anonymous
+source repository access and the unchanged application ZIP checksum. Local tests
+passed 74 checks with the same Windows symlink-privilege skip noted below.
+
 - Python 3.13.0 x64 on Windows 11 build 26100: automated suite initially passed
   74 tests; one actual-symlink test skipped because the host disallows creating
   symlinks without Developer Mode/elevation. Additional checks are recorded below.
