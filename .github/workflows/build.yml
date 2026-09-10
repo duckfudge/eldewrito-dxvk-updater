@@ -1,0 +1,45 @@
+name: Test and build updater
+on:
+  push:
+    branches: [main]
+    tags: ['updater-v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the packaged updater to the public patch repo
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: updater-build-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.event.repository.private == true
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m pytest
+      - run: python scripts/build_windows.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ElDewritoDXVKUpdater-windows-x64
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          retention-days: 14
+      - name: Publish packaged application only
+        if: (startsWith(github.ref, 'refs/tags/updater-v') || inputs.publish == true) && github.event_name != 'pull_request'
+        env:
+          PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+        run: python scripts/publish_release.py

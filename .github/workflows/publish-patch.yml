@@ -1,0 +1,37 @@
+name: Publish patch feed
+on:
+  schedule:
+    - cron: '17,47 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Validate without publishing
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: public-dxvk-patch-feed
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.event.repository.private == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Validate and publish current public patch
+        env:
+          PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run || false }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            python scripts/publish_patch.py --dry-run
+          else
+            python scripts/publish_patch.py
+          fi
