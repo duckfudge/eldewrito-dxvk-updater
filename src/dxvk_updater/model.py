@@ -39,7 +39,7 @@ def read_json(data: bytes | str) -> dict:
         if not isinstance(result, dict):
             raise ValueError("Expected object")
         return result
-    except (ValueError, UnicodeError, RecursionError) as exc:
+    except (ValueError, TypeError, UnicodeError, RecursionError) as exc:
         raise UpdaterError("The update metadata is not valid JSON.") from exc
 
 
@@ -136,10 +136,20 @@ def validate_payload(name: str, data: bytes):
             if data[:2] != b"MZ" or data[offset:offset+4] != b"PE\0\0":
                 raise ValueError()
             machine = struct.unpack_from("<H", data, offset + 4)[0]
+            sections = struct.unpack_from("<H", data, offset + 6)[0]
+            optional_size = struct.unpack_from("<H", data, offset + 20)[0]
             characteristics = struct.unpack_from("<H", data, offset + 22)[0]
             magic = struct.unpack_from("<H", data, offset + 24)[0]
-            if machine != 0x14C or magic != 0x10B or not characteristics & 0x2000:
+            if offset < 64 or machine != 0x14C or magic != 0x10B or characteristics & 0x2002 != 0x2002:
                 raise ValueError()
+            table = offset + 24 + optional_size
+            header_size = struct.unpack_from("<I", data, offset + 24 + 60)[0]
+            if optional_size < 96 or not 1 <= sections <= 96 or not table + 40 * sections <= header_size <= len(data):
+                raise ValueError()
+            for i in range(sections):
+                raw_size, raw_offset = struct.unpack_from("<II", data, table + 40 * i + 16)
+                if raw_size and (raw_offset < header_size or raw_offset + raw_size > len(data)):
+                    raise ValueError()
         except (struct.error, ValueError):
             raise UpdaterError("d3d9.dll must be a valid 32-bit Windows DLL.") from None
     elif name == "dxvk.conf":
@@ -155,8 +165,30 @@ def validate_payload(name: str, data: bytes):
                         raise ValueError()
         except (UnicodeError, ValueError):
             raise UpdaterError("dxvk.conf must be a readable UTF-8 DXVK configuration.") from None
-    elif not data.startswith(b"DXVK"):
-        raise UpdaterError("The shader cache does not have a DXVK cache header.")
+    else:
+        validate_cache(data)
+
+
+def validate_cache(data: bytes):
+    # DXVK v2.5.3's state-cache format: 12-byte file header, then length/hash/data.
+    # Check framing and stored integrity, not GPU compatibility or pipeline semantics.
+    try:
+        magic, version, _ = struct.unpack_from("<4sII", data)
+        if magic != b"DXVK" or not 8 <= version <= 18 or version == 16:
+            raise ValueError()
+        offset = 12
+        while offset < len(data):
+            header = struct.unpack_from("<I", data, offset)[0]
+            size = header >> (6 if version >= 17 else 8)
+            end = offset + 24 + size
+            if not 0 < size <= 1024 or end > len(data):
+                raise ValueError()
+            expected = data[offset + 4:offset + 24]
+            if hashlib.sha1(data[offset + 24:end], usedforsecurity=False).digest() != expected:
+                raise ValueError()
+            offset = end
+    except (struct.error, ValueError):
+        raise UpdaterError("The shader cache is truncated, damaged, or uses an unsupported format (supported: 8–15, 17–18).") from None
 
 
 def make_manifest(commit: str, payloads: dict[str, bytes], summary: str) -> Manifest:

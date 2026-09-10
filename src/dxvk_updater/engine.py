@@ -5,7 +5,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from .model import FILES, MAX_SIZES, Manifest, UpdaterError, read_json, sha256_file
+from .model import FILES, Manifest, UpdaterError, read_json, sha256_file
 from .storage import (Store, atomic_copy, atomic_json, ensure_game_closed,
                       safe_regular, validate_backup, validate_state)
 
@@ -33,7 +33,7 @@ class Installer:
         record_path = folder / "record.json"
         safe_regular(record_path, missing=False)
         record = read_json(record_path.read_bytes())
-        if set(record) != {"schema_version", "id", "before_state", "desired_state", "entries"} or record["schema_version"] != 1 or record["id"] != transaction:
+        if set(record) != {"schema_version", "id", "before_state", "desired_state", "entries"} or type(record["schema_version"]) is not int or record["schema_version"] != 1 or record["id"] != transaction:
             raise UpdaterError("The recovery journal is damaged.")
         validate_state(record["before_state"])
         desired = validate_state(record["desired_state"])
@@ -64,7 +64,16 @@ class Installer:
                 target.unlink(missing_ok=True)
         self.store.save_state(record["before_state"])
         self.store.journal_path.unlink()
-        self.store.remove_transaction(record["id"])
+        self._discard_unstarted(record["id"])
+
+    def _discard_unstarted(self, transaction):
+        # Never discard backups while a journal may still need them for recovery.
+        if self.store.journal_path.exists():
+            return
+        try:
+            self.store.remove_transaction(transaction)
+        except (OSError, UpdaterError):
+            pass
 
     def _recover(self):
         safe_regular(self.store.journal_path)
@@ -97,8 +106,9 @@ class Installer:
         if installed is None:
             matching = not missing and all(sha256_file(self.store.game_file(f.name)) == f.sha256 for f in available.files)
             if matching and adopt:
-                self.store.save_state({"schema_version": 1, "manifest": available.to_dict(), "transaction_id": None})
-                return Status("current", available, available, (), (), False)
+                transaction = state["transaction_id"] if state else None
+                self.store.save_state({"schema_version": 1, "manifest": available.to_dict(), "transaction_id": transaction})
+                return Status("current", available, available, (), (), can_restore)
             return Status("adopt" if matching else "install", None, available, FILES, missing, can_restore)
         old_hashes = {file.name: file.sha256 for file in installed.files}
         changed = tuple(f.name for f in available.files if old_hashes[f.name] != f.sha256)
@@ -119,33 +129,40 @@ class Installer:
         transaction = uuid.uuid4().hex
         folder = self.store.tx_path(transaction)
         folder.mkdir()
-        (folder / "stage").mkdir()
-        (folder / "before").mkdir()
-        record = {"schema_version": 1, "id": transaction, "before_state": self.store.state(),
-                  "desired_state": {"schema_version": 1, "manifest": desired_manifest,
-                                    "transaction_id": transaction}, "entries": []}
-        for name in names:
-            source = self.store.game_file(name)
-            existed = source.exists()
-            entry = {"name": name, "existed": existed, "size": None, "sha256": None}
-            if existed:
-                if source.stat().st_size > MAX_SIZES[name]:
-                    raise UpdaterError(f"Existing {name} is unexpectedly large. Back it up manually before continuing.")
-                backup = folder / "before" / name
-                atomic_copy(source, backup)
-                entry.update(size=backup.stat().st_size, sha256=sha256_file(backup))
-            record["entries"].append(entry)
+        try:
+            (folder / "stage").mkdir()
+            (folder / "before").mkdir()
+            record = {"schema_version": 1, "id": transaction, "before_state": self.store.state(),
+                      "desired_state": {"schema_version": 1, "manifest": desired_manifest,
+                                        "transaction_id": transaction}, "entries": []}
+            for name in names:
+                source = self.store.game_file(name)
+                existed = source.exists()
+                entry = {"name": name, "existed": existed, "size": None, "sha256": None}
+                if existed:
+                    # Local shader caches can grow beyond the upstream download limit.
+                    backup = folder / "before" / name
+                    atomic_copy(source, backup)
+                    entry.update(size=backup.stat().st_size, sha256=sha256_file(backup))
+                record["entries"].append(entry)
+        except Exception:
+            self._discard_unstarted(transaction)
+            raise
         return folder, record
 
     def _commit(self, folder, record, actions):
-        self.game_guard(self.store.root)
-        # Recheck files against their backups after staging and before the first write.
-        for entry in record["entries"]:
-            current = self.store.game_file(entry["name"])
-            if current.exists() != entry["existed"] or entry["existed"] and sha256_file(current) != entry["sha256"]:
-                raise UpdaterError("A patch file changed while preparing the update. Close the game and try again.")
-        atomic_json(folder / "record.json", record)
-        atomic_json(self.store.journal_path, {"transaction_id": record["id"]})
+        try:
+            self.game_guard(self.store.root)
+            # Recheck files against their backups before the first write.
+            for entry in record["entries"]:
+                current = self.store.game_file(entry["name"])
+                if current.exists() != entry["existed"] or entry["existed"] and sha256_file(current) != entry["sha256"]:
+                    raise UpdaterError("A patch file changed while preparing the update. Close the game and try again.")
+            atomic_json(folder / "record.json", record)
+            atomic_json(self.store.journal_path, {"transaction_id": record["id"]})
+        except Exception:
+            self._discard_unstarted(record["id"])
+            raise
         try:
             for i, (name, source) in enumerate(actions):
                 self.game_guard(self.store.root)
@@ -177,7 +194,7 @@ class Installer:
             self.game_guard(self.store.root)
             status = self._status(manifest)
             if status.kind == "adopt" and not repair:
-                self.store.save_state({"schema_version": 1, "manifest": manifest.to_dict(), "transaction_id": None})
+                self._status(manifest, adopt=True)
                 return
             names = FILES if repair or status.installed is None else tuple(name for name in FILES if name in status.changed or name in status.missing)
             if not names:
