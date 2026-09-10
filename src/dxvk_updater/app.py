@@ -226,7 +226,7 @@ class App(ctk.CTk):
                         if operation == "restore":
                             self.badge.configure(text="RESTORE COMPLETE", text_color=GREEN)
                             self.headline.configure(text="Your previous files are back")
-                            self.summary.configure(text="You can keep playing with the restored patch. Updates remain optional.")
+                            self.summary.configure(text="The previous file state has been restored. Updates remain optional.")
                         self.progress.set(1)
                     self._buttons()
                 elif kind == "error":
