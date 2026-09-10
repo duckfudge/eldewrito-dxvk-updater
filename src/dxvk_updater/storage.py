@@ -10,7 +10,7 @@ import stat
 import tempfile
 from pathlib import Path
 
-from .model import FILES, MAX_SIZES, Manifest, UpdaterError, read_json, sha256_file
+from .model import FILES, Manifest, UpdaterError, read_json, sha256_file
 
 ID_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
 
@@ -63,7 +63,7 @@ def atomic_copy(source: Path, destination: Path):
 def validate_state(value):
     if value is None:
         return None
-    if not isinstance(value, dict) or set(value) != {"schema_version", "manifest", "transaction_id"} or value["schema_version"] != 1:
+    if not isinstance(value, dict) or set(value) != {"schema_version", "manifest", "transaction_id"} or type(value["schema_version"]) is not int or value["schema_version"] != 1:
         raise UpdaterError("Installed patch records are damaged. Restore your .dxvk-updater backup.")
     transaction = value["transaction_id"]
     if transaction is not None and (not isinstance(transaction, str) or not ID_PATTERN.fullmatch(transaction)):
@@ -198,7 +198,7 @@ def validate_backup(entry, folder: Path):
     if name not in FILES or type(entry["existed"]) is not bool:
         raise UpdaterError("The restore record contains an unsupported file.")
     if entry["existed"]:
-        if type(entry["size"]) is not int or not 0 <= entry["size"] <= MAX_SIZES[name]:
+        if type(entry["size"]) is not int or entry["size"] < 0:
             raise UpdaterError("Invalid backup size.")
         safe_regular(folder, directory=True, missing=False)
         source = folder / name

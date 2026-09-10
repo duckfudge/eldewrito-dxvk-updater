@@ -1,10 +1,29 @@
 # ElDewrito DXVK Updater
 
-Python application and automation for `duckfudge/eldewrito-dxvk`.
-The patch repository contains the patch and generated downloads; this public repository
-contains all updater source, tests, build scripts, and publishing workflows.
+A Python desktop updater for the curated [ElDewrito DXVK patch](https://github.com/duckfudge/eldewrito-dxvk).
+It checks for updates when opened, asks before installing, and keeps a restore point.
+The target is ElDewrito 0.7 on Windows 10/11 x64; the game uses an **x86 DXVK DLL**.
 
-## Run and build
+## For players
+
+Download an **ElDewritoDXVKUpdater-…-windows-x64.zip** from the patch repository's
+[releases](https://github.com/duckfudge/eldewrito-dxvk/releases). Extract the entire
+folder and run `ElDewritoDXVKUpdater.exe`. Python is included. Choose the folder
+containing `eldorado.exe`, or put the updater beside it for automatic detection.
+
+- **Update now** installs changed upstream files and replaces missing files.
+- **Later** postpones installation; **Check again** refreshes the published patch.
+- **Repair patch** downloads and replaces all three managed files, with backups.
+- **Restore previous update** restores the last affected files, including which
+  files originally did not exist. Restoration also works offline.
+
+Only `d3d9.dll`, `dxvk.conf`, and `eldorado.dxvk-cache` are managed. Local cache
+growth and configuration edits do not trigger repeated updates. Repair or an
+upstream change to those files replaces the local copies after backing them up.
+Close ElDewrito before installing or restoring. The app has no tray service,
+telemetry, automatic installation, or publishing credentials.
+
+## Development
 
 Use Python 3.13 x64 on Windows:
 
@@ -16,77 +35,53 @@ py -3.13 -m venv .venv
 .\.venv\Scripts\python.exe scripts/build_windows.py
 ```
 
-The packaged executable and ZIP appear in `dist`. The ZIP includes the Python
-runtime, Tcl/Tk, CustomTkinter resources, and dependency license notices. Keep the
-entire extracted folder together. `python launcher.py --preview` shows synthetic
-UI data with all patch actions disabled. It does not modify game files.
+The one-folder PyInstaller build and ZIP appear in `dist/`. Keep all extracted
+files together: Python, Tcl/Tk, CustomTkinter assets, and license notices are
+included. `python launcher.py --game-dir "C:\Games\Halo Online"` selects a folder
+explicitly. Source code is licensed under [0BSD](LICENSE); dependencies retain
+their own licenses.
 
-## What players see
+Tests use temporary synthetic game folders and never execute a game or contact
+GitHub. CI tests on Linux and Windows and builds the Windows package. Run the
+suite when changing update logic or publishing behavior; include regression tests
+with bug fixes. Clean Windows 10/11 machines without Python and display scaling
+at 100%, 150%, and 200% still require manual release testing.
 
-The updater remembers a selected folder containing `eldorado.exe`, checks the
-public feed on startup, and offers **Install patch**, **Update now**, or **Later**.
-Downloads and installation run on a worker thread; the UI receives queue events.
-The app never runs a background service or starts/closes the game.
+## How updates work
 
-Only `d3d9.dll`, `dxvk.conf`, and `eldorado.dxvk-cache` are managed. An update replaces
-files that changed upstream, plus any missing files. **Repair patch** replaces all
-three published files. Every affected local copy is backed up. The growing local
-shader cache and manual config edits do not by themselves generate update prompts.
+The [publishing workflow](.github/workflows/publish-patch.yml) checks patch `main`
+every 30 minutes and on manual runs. It validates all three files and writes
+`updates/manifest.json` only when their contents change. Documentation-only commits
+do not produce patch revisions. Scheduling can be delayed by GitHub.
 
-## Publishing
+The manifest identifies a source commit and contains filenames, sizes, SHA-256
+hashes, a content-derived patch ID, a publication date, and a short summary. The
+client downloads from that exact commit using a fixed GitHub repository. It
+rejects arbitrary paths, URLs, commands, oversized files, and checksum mismatches.
+DLL validation checks x86 PE headers and section bounds. Cache validation checks
+record boundaries and stored hashes for formats 8–15 and 17–18, including the
+current curated cache. These checks do not establish GPU compatibility or prove
+that a binary is safe; the patch publisher remains trusted.
 
-See [setup and maintenance](docs/MAINTENANCE.md). The **Publish patch feed**
-workflow checks the public `main` branch at minutes 17 and 47 each hour and can also
-be run manually. It publishes a new manifest only when the three patch-file hashes
-change. A failed validation leaves the existing feed in place.
+Each selected game has its own `.dxvk-updater` state and backups. All downloads are
+verified before replacement. A per-game lock excludes concurrent updaters; a
+journal supports rollback after errors or interrupted updates. Saving the installed
+state commits a transaction. Recovery runs before the network check. Keep this
+directory intact while updating or recovering. A damaged backup stops restoration
+before any file is changed. Local backups can exceed the upstream download limits.
 
-The **Test and build updater** workflow runs tests and builds a Windows
-package. Public release publication requires a version tag or an explicit manual
-publish input. Releases in the patch repository contain packaged downloads.
-Application source is available here. Workflows run only in the canonical
-`duckfudge/eldewrito-dxvk-updater` repository. Publishing credentials remain in
-Actions secrets and are never passed to pull-request builds or bundled in the app.
+HTTPS, commit pinning, and hashes protect transport integrity; the manifest is not
+independently signed. GitHub account and publishing-secret access determine who
+can publish a trusted patch. Managed files and metadata reject links and junctions.
+Network and installation work runs in a worker thread, with UI updates passed
+through a queue to Tkinter's main thread.
 
-## Layout
+## Repository layout
 
-- `src/dxvk_updater`: application UI, strict manifest protocol, bounded downloads,
-  per-game settings, and journaled installation/recovery.
-- `scripts`: patch publisher, Windows builder, and public binary publisher.
-- `tests`: isolated fixtures and simulated failures; no real game installation is
-  used or modified by the test suite.
-- `.github/workflows`: scheduled publisher and Windows build workflow.
+- `src/dxvk_updater/`: interface, protocol, downloads, settings, and recovery.
+- `scripts/`: patch publishing, Windows packaging, and application releases.
+- `tests/`: installation, failure recovery, validation, UI state, and publisher tests.
+- `.github/workflows/`: test/build and scheduled patch publication.
 
-## Recovery model
-
-Each game has a `.dxvk-updater` directory with `installed.json`, a lock, and
-transaction directories. All downloads are staged and verified before backups.
-Backups and their checksums are written before the recovery journal, which is
-written before any game-file replacement. Saving the desired installed state is
-the commit marker. A crash before that marker rolls the transaction back on next
-startup; a crash after it only requires cleanup. Recovery works offline.
-
-Windows cannot atomically replace three files at once. The journal makes partial
-updates recoverable; don't delete `.dxvk-updater` during an update or recovery.
-An unreadable or corrupted backup stops recovery with an actionable message.
-The app refuses links/junctions in managed files or its metadata paths, uses a
-per-game cross-process lock, and never accepts filenames or commands outside its
-three-file allowlist.
-
-The manifest's HTTPS transport, fixed repository, commit pinning, and SHA-256
-checks protect download integrity. GitHub account and publishing-token access are
-the trust boundary; hashes are not an independent publisher signature.
-
-## Compatibility and validation
-
-The target is Windows 10/11 x64 and the curated ElDewrito 0.7 DXVK package. DLL
-validation requires an x86 PE DLL. The updater does not select an upstream DXVK
-version or infer GPU compatibility from Vulkan instance versions.
-
-Automated tests cover the protocol, per-file updates, manual installs, cache
-growth, repair, restore, locks, download failures, crash boundaries, and publishing
-races. Validate the packaged executable on a Windows 10 and Windows 11 machine
-without Python, and visually check 100%, 150%, and 200% display scaling before
-claiming compatibility on those configurations. See `docs/VALIDATION.md` for the
-checks actually completed for this build.
-
-Third-party dependencies retain their own licenses.
+See [publishing and maintenance](docs/MAINTENANCE.md) for credential setup,
+releasing a new updater, handling workflow failures, and reverting a bad patch.

@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 import struct
 
@@ -73,3 +74,33 @@ def test_rejects_64bit_dll(payloads):
     struct.pack_into("<H", dll, 0x84, 0x8664)
     with pytest.raises(UpdaterError, match="32-bit"):
         validate_payload("d3d9.dll", bytes(dll))
+
+
+@pytest.mark.parametrize("cut", [160, 512, 1023])
+def test_rejects_truncated_pe_sections(payloads, cut):
+    with pytest.raises(UpdaterError, match="32-bit"):
+        validate_payload("d3d9.dll", payloads["d3d9.dll"][:cut])
+
+
+@pytest.mark.parametrize("version", [8, 15, 17, 18])
+def test_cache_record_integrity(version):
+    body = b"s" * 20
+    packed = (len(body) << (6 if version >= 17 else 8)) | 3
+    data = (struct.pack("<4sIII", b"DXVK", version, 0, packed)
+            + hashlib.sha1(body, usedforsecurity=False).digest() + body)
+    validate_payload("eldorado.dxvk-cache", data)
+    for damaged in (data[:4], data[:-1], data[:-1] + b"x", data + b"x"):
+        with pytest.raises(UpdaterError, match="shader cache"):
+            validate_payload("eldorado.dxvk-cache", damaged)
+
+
+@pytest.mark.parametrize("version", [0, 7, 16, 19])
+def test_rejects_unsupported_cache_format(version):
+    with pytest.raises(UpdaterError, match="unsupported"):
+        validate_payload("eldorado.dxvk-cache", struct.pack("<4sII", b"DXVK", version, 0))
+
+
+def test_installed_schema_rejects_boolean():
+    from dxvk_updater.storage import validate_state
+    with pytest.raises(UpdaterError, match="damaged"):
+        validate_state({"schema_version": True, "manifest": None, "transaction_id": None})

@@ -5,7 +5,6 @@ import argparse
 import logging
 import logging.handlers
 import queue
-import sys
 import threading
 import tkinter as tk
 import webbrowser
@@ -16,8 +15,8 @@ from tkinter import filedialog, messagebox
 import customtkinter as ctk
 
 from . import __version__
-from .engine import Installer, Status
-from .model import FILES, RELEASES_URL, Manifest, UpdaterError
+from .engine import Installer
+from .model import FILES, RELEASES_URL, UpdaterError
 from .network import FeedClient
 from .settings import remember_game, settings_directory, suggested_game
 
@@ -38,7 +37,7 @@ def human_size(size):
 
 
 class App(ctk.CTk):
-    def __init__(self, *, game=None, preview=False):
+    def __init__(self, *, game=None):
         super().__init__()
         self.title(f"ElDewrito DXVK Updater · {__version__}")
         self.geometry("1060x760")
@@ -50,7 +49,6 @@ class App(ctk.CTk):
         self.manifest = None
         self.status = None
         self.game = game or suggested_game()
-        self.preview = preview
         self.details_visible = False
         self.operation = None
         self.grid_columnconfigure(1, weight=1)
@@ -58,10 +56,7 @@ class App(ctk.CTk):
         self._build()
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.after(60, self._poll)
-        if preview:
-            self._preview()
-        else:
-            self.after(250, self.check)
+        self.after(250, self.check)
 
     def label(self, parent, text, size=14, color=TEXT, weight="normal", **kwargs):
         return ctk.CTkLabel(parent, text=text, text_color=color,
@@ -175,7 +170,7 @@ class App(ctk.CTk):
         return str(self.game) if self.game else "Choose the folder containing eldorado.exe"
 
     def _buttons(self):
-        available = not self.busy and not self.preview
+        available = not self.busy
         for button in (self.check_button, self.folder_button):
             button.configure(state="normal" if available else "disabled")
         ready = available and self.game is not None and self.manifest is not None
@@ -189,7 +184,7 @@ class App(ctk.CTk):
         self.events.put(("progress", (text, fraction)))
 
     def _run(self, operation, function):
-        if self.busy or self.preview:
+        if self.busy:
             return
         self.busy = True
         self.operation = operation
@@ -224,15 +219,20 @@ class App(ctk.CTk):
                         self.status = result
                         if self.status:
                             self._render()
+                        else:
+                            self.installed_value.configure(text="Restored locally")
+                            self.installed_date.configure(text="Check again for published status")
+                            self.file_list.configure(text="")
                         if operation == "restore":
                             self.badge.configure(text="RESTORE COMPLETE", text_color=GREEN)
                             self.headline.configure(text="Your previous files are back")
-                            self.summary.configure(text="You can keep playing with the restored patch. Updates remain optional.")
+                            self.summary.configure(text="The previous file state has been restored. Updates remain optional.")
                         self.progress.set(1)
                     self._buttons()
                 elif kind == "error":
                     self.busy = False
                     if self.operation == "check":
+                        self.manifest = None
                         self.available_value.configure(text="Unavailable")
                         self.available_date.configure(text="Try checking again")
                     # Clear stale update choices after an error; restoration remains available.
@@ -263,7 +263,7 @@ class App(ctk.CTk):
         self.available_date.configure(text=f"Published {manifest.published_at[:10]}")
         if status and status.installed:
             self.installed_value.configure(text=status.installed.patch_id[:10])
-            self.installed_date.configure(text=f"Installed release · {status.installed.published_at[:10]}")
+            self.installed_date.configure(text=f"Patch published · {status.installed.published_at[:10]}")
         else:
             self.installed_value.configure(text="Not managed yet" if self.game else "No folder selected")
             self.installed_date.configure(text="Ready for first installation" if self.game else "Select your ElDewrito folder")
@@ -302,14 +302,22 @@ class App(ctk.CTk):
         self.game = game.resolve()
         try:
             remember_game(self.game)
-        except OSError as exc:
+        except (OSError, UpdaterError) as exc:
             self._log(f"Could not remember folder: {exc}")
         self.folder_label.configure(text=self._folder_text())
         self.status = None
+        self.installed_value.configure(text="Not checked")
+        self.installed_date.configure(text="Checking selected folder")
         self.check()
 
     def check(self):
+        if self.busy:
+            return
         game = self.game
+        self.manifest = None
+        self.status = None
+        self.available_value.configure(text="Checking…")
+        self.available_date.configure(text="Connecting to GitHub")
         self.progress.set(0)
         def work():
             client = FeedClient()
@@ -360,7 +368,7 @@ class App(ctk.CTk):
     def later(self):
         self.badge.configure(text="UPDATE POSTPONED", text_color=MUTED)
         self.headline.configure(text="Play on your own schedule")
-        self.summary.configure(text="Your patch files have not been changed. You can update here when you’re ready.")
+        self.summary.configure(text="You can update here when you’re ready.")
 
     def toggle_details(self):
         self.details_visible = not self.details_visible
@@ -377,22 +385,8 @@ class App(ctk.CTk):
             return
         self.destroy()
 
-    def _preview(self):
-        # Developer-only visual fixture. No downloads or game-file operations.
-        from .model import make_manifest
-        from .demo import demo_payloads
-        previous = make_manifest("a" * 40, demo_payloads(), "Previous patch")
-        latest = make_manifest("b" * 40, demo_payloads(updated=True), "Updated DXVK configuration and shader cache for ElDewrito 0.7.")
-        self.manifest = latest
-        self.status = Status("update", previous, latest, ("dxvk.conf", "eldorado.dxvk-cache"), (), True)
-        self.folder_label.configure(text="Preview only · no game files are accessed")
-        self._render()
-        self.badge.configure(text="INTERFACE PREVIEW")
-
-
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--preview", action="store_true", help="Show a noninteractive visual fixture")
     parser.add_argument("--game-dir", type=Path)
     args = parser.parse_args()
     directory = settings_directory()
@@ -404,7 +398,7 @@ def main():
         logging.basicConfig(level=logging.INFO)
     ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("blue")
-    App(game=args.game_dir, preview=args.preview).mainloop()
+    App(game=args.game_dir).mainloop()
 
 
 if __name__ == "__main__":

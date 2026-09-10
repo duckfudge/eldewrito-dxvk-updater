@@ -1,3 +1,3 @@
-"""ElDewrito DXVK Updater. Application and automation source is private."""
+"""ElDewrito DXVK Updater."""
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
