@@ -89,3 +89,15 @@ waiting. Application downgrade decisions are never inferred from commit hashes.
 
 Player logs are local only, under `%LOCALAPPDATA%/ElDewritoDXVKUpdater` with rotation.
 No telemetry or automatic log uploads are included.
+
+## Repeat the deployment checks
+
+Run `python scripts/smoke_live.py` to exercise the live patch in a newly created
+synthetic game folder under `build/live-smoke`. It never executes the fixture's
+game marker. Run `python scripts/verify_public_release.py` to download and audit
+the released ZIP, checksum, asset list, public source archive, private repository
+anonymous access, and latest patch release. These scripts need network access
+but no publishing credential. Outputs and test fixtures stay under `build`/`dist`.
+
+When releasing a newer application, update its download link in the public README.
+The version-specific link keeps the public latest-release URL reserved for DXVK.
