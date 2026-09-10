@@ -1,7 +1,7 @@
 # ElDewrito DXVK Updater
 
-Private Python application and automation for `duckfudge/eldewrito-dxvk`.
-The public repository contains the patch and generated downloads; this repository
+Python application and automation for `duckfudge/eldewrito-dxvk`.
+The patch repository contains the patch and generated downloads; this public repository
 contains all updater source, tests, build scripts, and publishing workflows.
 
 ## Run and build
@@ -35,24 +35,26 @@ shader cache and manual config edits do not by themselves generate update prompt
 
 ## Publishing
 
-See [setup and maintenance](docs/MAINTENANCE.md). The private **Publish patch feed**
+See [setup and maintenance](docs/MAINTENANCE.md). The **Publish patch feed**
 workflow checks the public `main` branch at minutes 17 and 47 each hour and can also
 be run manually. It publishes a new manifest only when the three patch-file hashes
 change. A failed validation leaves the existing feed in place.
 
-The private **Test and build updater** workflow runs tests and builds a Windows
+The **Test and build updater** workflow runs tests and builds a Windows
 package. Public release publication requires a version tag or an explicit manual
-publish input. Public releases contain packaged downloads, not this repository's
-source. Keep this repository private; both workflows refuse to run if it is public.
+publish input. Releases in the patch repository contain packaged downloads.
+Application source is available here. Workflows run only in the canonical
+`duckfudge/eldewrito-dxvk-updater` repository. Publishing credentials remain in
+Actions secrets and are never passed to pull-request builds or bundled in the app.
 
 ## Layout
 
 - `src/dxvk_updater`: application UI, strict manifest protocol, bounded downloads,
   per-game settings, and journaled installation/recovery.
-- `scripts`: private patch publisher, Windows builder, and public binary publisher.
+- `scripts`: patch publisher, Windows builder, and public binary publisher.
 - `tests`: isolated fixtures and simulated failures; no real game installation is
   used or modified by the test suite.
-- `.github/workflows`: private scheduled publisher and Windows build workflow.
+- `.github/workflows`: scheduled publisher and Windows build workflow.
 
 ## Recovery model
 
@@ -87,4 +89,4 @@ without Python, and visually check 100%, 150%, and 200% display scaling before
 claiming compatibility on those configurations. See `docs/VALIDATION.md` for the
 checks actually completed for this build.
 
-Application source is private. Third-party dependencies retain their own licenses.
+Third-party dependencies retain their own licenses.
