@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import sys
 from pathlib import Path
 
@@ -16,6 +17,9 @@ from scripts.github_api import APIError, GitHub
 
 def publish_release(api, directory):
     tag = f"updater-v{__version__}"
+    ref = os.environ.get("GITHUB_REF", "")
+    if ref.startswith("refs/tags/") and ref != f"refs/tags/{tag}":
+        raise UpdaterError("The workflow tag does not match the application version.")
     archive = directory / f"ElDewritoDXVKUpdater-{__version__}-windows-x64.zip"
     checksum = archive.with_suffix(".zip.sha256")
     audit_archive(archive)
@@ -36,11 +40,10 @@ def publish_release(api, directory):
                     "Select the folder containing eldorado.exe. Python is bundled; no separate installation is needed.\n\n"
                     "The app checks for DXVK patch updates when opened, asks before installing, and keeps a restore point. "
                     "This release is the updater application; DXVK patch releases remain separate."})
-    existing = {asset["name"]: asset for asset in release.get("assets", [])}
+    if release.get("assets"):
+        # Every published asset must pass this run's audit, including on retries.
+        raise UpdaterError("The draft already contains assets. Review and remove the incomplete draft before retrying.")
     for file in (archive, checksum):
-        if file.name in existing:
-            # Leave a failed draft intact; avoid silently replacing an existing asset.
-            raise UpdaterError("A draft already contains an asset with this name. Review the draft before retrying.")
         api.upload_asset(release, file)
     result = api.call("PATCH", f"{base}/{release['id']}", {"draft": False, "make_latest": "false"})
     return result["html_url"]
