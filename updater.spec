@@ -1,4 +1,4 @@
-# Build on Windows using the private repository's pinned dependencies.
+# Build on Windows using the repository's pinned dependencies.
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files
 
