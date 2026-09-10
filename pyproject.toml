@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eldewrito-dxvk-updater"
+version = "1.0.0"
+description = "A recoverable, consent-based DXVK patch updater for ElDewrito"
+requires-python = ">=3.13"
+dependencies = ["customtkinter==5.2.2", "requests==2.34.2", "psutil==7.2.2"]
+
+[project.gui-scripts]
+eldewrito-dxvk-updater = "dxvk_updater.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+addopts = "-ra"
