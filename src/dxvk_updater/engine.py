@@ -83,13 +83,15 @@ class Installer:
         if set(pointer) != {"transaction_id"}:
             raise UpdaterError("The recovery pointer is damaged.")
         transaction = pointer["transaction_id"]
-        record = self._read_record(transaction)
         current = self.store.state()
-        if current == record["desired_state"]:
+        # A fresh transaction ID in validated installed state is the commit marker.
+        # Completed installation cleanup must not depend on the old backup's health.
+        if current and current["transaction_id"] == transaction:
             self.store.journal_path.unlink()
             self.store.cleanup(transaction)
             self.emit("Finished cleanup for the completed update.")
             return
+        record = self._read_record(transaction)
         self.emit("Recovering the interrupted update…")
         self._rollback(record)
         self.emit("Your previous patch has been restored.")
