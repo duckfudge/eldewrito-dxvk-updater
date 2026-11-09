@@ -158,10 +158,16 @@ class Store:
                     file = folder / name
                     safe_regular(file)
                     file.unlink(missing_ok=True)
+                for temp in folder.glob(".dxvk-writing-*"):
+                    safe_regular(temp)
+                    temp.unlink()
                 folder.rmdir()
         record = target / "record.json"
         safe_regular(record)
         record.unlink(missing_ok=True)
+        for temp in target.glob(".writing-*"):
+            safe_regular(temp)
+            temp.unlink()
         target.rmdir()
 
     def cleanup(self, keep):

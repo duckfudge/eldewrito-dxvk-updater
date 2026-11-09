@@ -14,9 +14,8 @@ from .storage import (Store, atomic_copy, atomic_json, ensure_game_closed,
 class Status:
     kind: str
     installed: Manifest | None
-    available: Manifest
     changed: tuple[str, ...]
-    missing: tuple[str, ...]
+    repair_files: tuple[str, ...]
     can_restore: bool
 
 
@@ -59,6 +58,8 @@ class Installer:
         for entry in record["entries"]:
             target = self.store.game_file(entry["name"])
             if entry["existed"]:
+                if target.exists() and target.stat().st_size == entry["size"] and sha256_file(target) == entry["sha256"]:
+                    continue
                 atomic_copy(folder / entry["name"], target)
             else:
                 target.unlink(missing_ok=True)
@@ -78,6 +79,8 @@ class Installer:
     def _recover(self):
         safe_regular(self.store.journal_path)
         if not self.store.journal_path.exists():
+            current = self.store.state()
+            self.store.cleanup(current["transaction_id"] if current else None)
             return
         pointer = read_json(self.store.journal_path.read_bytes())
         if set(pointer) != {"transaction_id"}:
@@ -103,24 +106,26 @@ class Installer:
     def _status(self, available: Manifest, *, adopt=False):
         state = self.store.state()
         installed = Manifest.parse(state["manifest"]) if state and state["manifest"] else None
-        missing = tuple(name for name in FILES if not self.store.game_file(name).exists())
+        repair_files = tuple(name for name in FILES if not self.store.game_file(name).exists())
         can_restore = bool(state and state["transaction_id"])
         if installed is None:
-            matching = not missing and all(sha256_file(self.store.game_file(f.name)) == f.sha256 for f in available.files)
+            matching = not repair_files and all(sha256_file(self.store.game_file(f.name)) == f.sha256 for f in available.files)
             if matching and adopt:
                 transaction = state["transaction_id"] if state else None
                 self.store.save_state({"schema_version": 1, "manifest": available.to_dict(), "transaction_id": transaction})
-                return Status("current", available, available, (), (), can_restore)
-            return Status("adopt" if matching else "install", None, available, FILES, missing, can_restore)
+                return Status("current", available, (), (), can_restore)
+            return Status("adopt" if matching else "install", None, FILES, repair_files, can_restore)
         old_hashes = {file.name: file.sha256 for file in installed.files}
+        if "d3d9.dll" not in repair_files and sha256_file(self.store.game_file("d3d9.dll")) != old_hashes["d3d9.dll"]:
+            repair_files = tuple(name for name in FILES if name == "d3d9.dll" or name in repair_files)
         changed = tuple(f.name for f in available.files if old_hashes[f.name] != f.sha256)
         if changed:
             kind = "update"
-        elif missing:
+        elif repair_files:
             kind = "repair"
         else:
             kind = "current"
-        return Status(kind, installed, available, changed, missing, can_restore)
+        return Status(kind, installed, changed, repair_files, can_restore)
 
     def check(self, available: Manifest):
         with self.store.lock():
@@ -132,7 +137,6 @@ class Installer:
         folder = self.store.tx_path(transaction)
         folder.mkdir()
         try:
-            (folder / "stage").mkdir()
             (folder / "before").mkdir()
             record = {"schema_version": 1, "id": transaction, "before_state": self.store.state(),
                       "desired_state": {"schema_version": 1, "manifest": desired_manifest,
@@ -198,7 +202,7 @@ class Installer:
             if status.kind == "adopt" and not repair:
                 self._status(manifest, adopt=True)
                 return
-            names = FILES if repair or status.installed is None else tuple(name for name in FILES if name in status.changed or name in status.missing)
+            names = FILES if repair or status.installed is None else tuple(name for name in FILES if name in status.changed or name in status.repair_files)
             if not names:
                 self.emit("Your patch is already up to date.", 1.0)
                 return
