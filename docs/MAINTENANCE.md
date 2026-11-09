@@ -22,9 +22,16 @@ fork builds can run tests and packaging without publishing access.
 ## Publish a patch change
 
 Commit compatible versions of `d3d9.dll`, `dxvk.conf`, and `eldorado.dxvk-cache`
-together on patch `main`. The publisher checks at minutes 17 and 47 each hour;
+together on patch `main`. The patch repository's
+[`Publish patch changes` workflow](https://github.com/duckfudge/eldewrito-dxvk/blob/main/.github/workflows/publish-patch.yml)
+runs on those file changes. It checks out the public updater source and uses its
+own short-lived `GITHUB_TOKEN` with Contents write permission, so that path needs
+no stored publishing credential. It also has a manual trigger.
+
+The updater repository's scheduled publisher checks at minutes 17 and 47 each hour;
 use **Run workflow** to check sooner. GitHub can delay or disable scheduled runs,
-so check Actions if a patch is not appearing.
+including after 60 days without activity in the updater repository. The separate
+push-only workflow continues to handle patch changes without relying on that schedule.
 
 The publisher calculates revision IDs and hashes automatically, pins downloads
 to the source commit, and preserves the previous feed on validation failure.
@@ -59,7 +66,8 @@ a general-purpose secret scanner. It uploads a ZIP and SHA-256 file to a draft,
 then publishes with `make_latest=false` so the latest DXVK patch designation stays
 unchanged. An existing release is never replaced. Review and remove any incomplete
 draft containing assets before retrying; existing draft assets are never published
-without review. Application source remains available in this repository.
+without review. Releases link the exact updater source commit from `GITHUB_SHA`;
+use the build workflow to publish. Application source remains available in this repository.
 
 ## Revert a bad patch
 

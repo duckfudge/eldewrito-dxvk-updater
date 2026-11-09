@@ -5,7 +5,7 @@ from PyInstaller.utils.hooks import collect_data_files
 root = Path(SPECPATH)
 a = Analysis([str(root / 'launcher.py')], pathex=[str(root / 'src')],
              binaries=[], datas=collect_data_files('customtkinter'), hiddenimports=[],
-             hookspath=[], hooksconfig={}, runtime_hooks=[], excludes=['pytest'],
+             hookspath=[], hooksconfig={}, runtime_hooks=[], excludes=['pytest', 'setuptools', 'unittest'],
              noarchive=False)
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='ElDewritoDXVKUpdater',

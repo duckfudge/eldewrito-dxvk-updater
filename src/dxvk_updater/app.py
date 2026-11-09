@@ -40,8 +40,7 @@ class App(ctk.CTk):
     def __init__(self, *, game=None):
         super().__init__()
         self.title(f"ElDewrito DXVK Updater · {__version__}")
-        self.geometry("1060x760")
-        self.minsize(900, 700)
+        self._fit_window()
         self.configure(fg_color=BG)
         self.events = queue.Queue()
         self.cancel = threading.Event()
@@ -51,7 +50,7 @@ class App(ctk.CTk):
         self.game = game or suggested_game()
         self.details_visible = False
         self.operation = None
-        self.grid_columnconfigure(1, weight=1)
+        self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
         self._build()
         self.protocol("WM_DELETE_WINDOW", self._close)
@@ -71,7 +70,10 @@ class App(ctk.CTk):
                              border_width=0 if primary else 1, border_color=EDGE, **kwargs)
 
     def _build(self):
-        side = ctk.CTkFrame(self, width=210, corner_radius=0, fg_color=PANEL)
+        content = ctk.CTkScrollableFrame(self, fg_color=BG, corner_radius=0)
+        content.grid(row=0, column=0, sticky="nsew")
+        content.grid_columnconfigure(1, weight=1)
+        side = ctk.CTkFrame(content, width=210, height=700, corner_radius=0, fg_color=PANEL)
         side.grid(row=0, column=0, sticky="nsew")
         side.grid_propagate(False)
         side.grid_columnconfigure(0, weight=1)
@@ -93,7 +95,7 @@ class App(ctk.CTk):
         self.restore_button.grid(row=8, column=0, padx=20, pady=6, sticky="ew")
         self.label(side, f"VERSION {__version__}\nWindows · ElDewrito 0.7", 11, MUTED, justify="left").grid(row=9, column=0, sticky="w", padx=24, pady=24)
 
-        body = ctk.CTkFrame(self, fg_color="transparent")
+        body = ctk.CTkFrame(content, fg_color="transparent")
         body.grid(row=0, column=1, sticky="nsew", padx=32, pady=28)
         body.grid_columnconfigure(0, weight=1)
         body.grid_rowconfigure(4, weight=1)
@@ -154,7 +156,21 @@ class App(ctk.CTk):
         self.label(footer, "Changes are applied only when you choose to update.", 11, MUTED).pack(side="left")
         ctk.CTkButton(footer, text="GitHub releases ↗", width=115, fg_color="transparent", hover_color=PANEL,
                       text_color=CYAN, command=lambda: webbrowser.open(RELEASES_URL)).pack(side="right")
+        body.bind("<Configure>", lambda event: self._wrap_text(event.width / body._get_widget_scaling()))
         self._buttons()
+
+    def _fit_window(self):
+        scale = self._get_window_scaling()
+        width = min(1060, int(self.winfo_screenwidth() / scale) - 40)
+        height = min(760, int(self.winfo_screenheight() / scale) - 80)
+        self.geometry(f"{width}x{height}+20+20")
+        self.minsize(min(900, width), min(600, height))
+
+    def _wrap_text(self, width):
+        self.headline.configure(wraplength=max(180, width - 40))
+        self.summary.configure(wraplength=max(180, width - 40))
+        self.progress_text.configure(wraplength=max(180, width))
+        self.folder_label.configure(wraplength=max(100, width - 220))
 
     def _version_card(self, parent, col, title, value, detail):
         frame = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=10)
@@ -274,20 +290,20 @@ class App(ctk.CTk):
             badge, headline, summary = "UP TO DATE", "You’re ready to play", "You have the latest published patch. Your local shader cache can continue growing normally."
             names = ()
         elif status.kind == "repair":
-            badge, headline, summary = "FILES MISSING", "Let’s restore your patch files", "Missing patch files can be downloaded again. Existing affected files will be backed up."
-            names = status.missing
+            badge, headline, summary = "REPAIR AVAILABLE", "Let’s restore your patch files", "Missing files or a changed rendering DLL can be downloaded again. Affected local files will be backed up."
+            names = status.repair_files
         else:
             badge = "UPDATE AVAILABLE" if status.installed else "PATCH AVAILABLE"
             headline = "A new patch is ready" if status.installed else "Bring DXVK to ElDewrito"
             summary = (manifest.summary[:280] or "A new curated DXVK patch is available.") + "\nAffected local files will be backed up and replaced."
             names = status.changed if status.installed else FILES
-            names = tuple(dict.fromkeys((*names, *status.missing)))
+            names = tuple(dict.fromkeys((*names, *status.repair_files)))
         self.badge.configure(text=badge, text_color=GREEN if status and status.kind == "current" else CYAN)
         self.headline.configure(text=headline)
         self.summary.configure(text=summary)
         files = [f for f in manifest.files if f.name in names]
         self.file_list.configure(text="  ·  ".join(f.name for f in files) + (f"\n{human_size(sum(f.size for f in files))} download" if files else ""))
-        self.update_button.configure(text="Install patch" if status and not status.installed else "Repair missing files" if status and status.kind == "repair" else "Update now")
+        self.update_button.configure(text="Install patch" if status and not status.installed else "Repair patch files" if status and status.kind == "repair" else "Update now")
         self.progress_text.configure(text="Checked just now · GitHub")
 
     def choose_folder(self):

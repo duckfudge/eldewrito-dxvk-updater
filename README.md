@@ -11,7 +11,7 @@ Download an **ElDewritoDXVKUpdater-…-windows-x64.zip** from the patch reposito
 folder and run `ElDewritoDXVKUpdater.exe`. Python is included. Choose the folder
 containing `eldorado.exe`, or put the updater beside it for automatic detection.
 
-- **Update now** installs changed upstream files and replaces missing files.
+- **Update now** installs changed upstream files and repairs missing files or a damaged DLL.
 - **Later** postpones installation; **Check again** refreshes the published patch.
 - **Repair patch** downloads and replaces all three managed files, with backups.
 - **Restore previous update** restores the last affected files, including which
@@ -49,10 +49,12 @@ at 100%, 150%, and 200% still require manual release testing.
 
 ## How updates work
 
-The [publishing workflow](.github/workflows/publish-patch.yml) checks patch `main`
-every 30 minutes and on manual runs. It validates all three files and writes
+The patch repository's [push workflow](https://github.com/duckfudge/eldewrito-dxvk/blob/main/.github/workflows/publish-patch.yml)
+publishes when patch files change on `main`. The [scheduled workflow](.github/workflows/publish-patch.yml)
+also checks every 30 minutes and on manual runs. Both validate all three files and write
 `updates/manifest.json` only when their contents change. Documentation-only commits
-do not produce patch revisions. Scheduling can be delayed by GitHub.
+do not produce patch revisions. GitHub can delay schedules or disable them after
+60 days of source-repository inactivity; patch pushes use a separate push-only workflow.
 
 The manifest identifies a source commit and contains filenames, sizes, SHA-256
 hashes, a content-derived patch ID, a publication date, and a short summary. The
@@ -69,6 +71,8 @@ journal supports rollback after errors or interrupted updates. Saving the instal
 state commits a transaction. Recovery runs before the network check. Keep this
 directory intact while updating or recovering. A damaged backup stops restoration
 before any file is changed. Local backups can exceed the upstream download limits.
+Startup removes abandoned staging and backup transactions while preserving the
+current restore point. Recovery skips files already matching their verified backups.
 
 HTTPS, commit pinning, and hashes protect transport integrity; the manifest is not
 independently signed. GitHub account and publishing-secret access determine who
