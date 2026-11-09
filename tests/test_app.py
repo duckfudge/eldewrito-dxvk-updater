@@ -2,6 +2,8 @@
 import queue
 from types import SimpleNamespace
 
+import pytest
+
 from dxvk_updater.app import App
 
 
@@ -48,3 +50,40 @@ def test_offline_restore_clears_stale_installed_details():
     App._poll(app)
     assert app.installed_value.options["text"] != "old patch ID"
     assert app.file_list.options["text"] == ""
+
+
+def test_damaged_dll_is_offered_as_repair(game, client, manifest):
+    from dxvk_updater.engine import Installer
+    engine = Installer(game, client, game_guard=lambda root: None)
+    engine.install(manifest)
+    (game / "d3d9.dll").write_bytes(b"")
+    app = ui(manifest)
+    app.game, app.busy, app.status = game, False, engine.check(manifest)
+    App._render(app)
+    App._buttons(app)
+    assert app.update_button.options["state"] == "normal"
+    assert app.update_button.options["text"] == "Repair patch files"
+    assert "d3d9.dll" in app.file_list.options["text"]
+    assert "dxvk.conf" not in app.file_list.options["text"]
+
+
+@pytest.mark.parametrize("scale", [1, 1.5, 2])
+def test_window_and_minimum_fit_screen_at_high_dpi(scale):
+    app = SimpleNamespace(_get_window_scaling=lambda: scale,
+                          winfo_screenwidth=lambda: 1920, winfo_screenheight=lambda: 1080)
+    sizes = {}
+    app.geometry = lambda value: sizes.update(geometry=value, window=tuple(map(int, value.partition("+")[0].split("x"))))
+    app.minsize = lambda w, h: sizes.update(minimum=(w, h))
+    App._fit_window(app)
+    assert sizes["geometry"].endswith("+20+20")
+    assert sizes["minimum"][0] <= sizes["window"][0] < 1920 / scale
+    assert sizes["minimum"][1] <= sizes["window"][1] < 1080 / scale
+
+
+def test_text_wraps_to_narrower_body():
+    app = SimpleNamespace(**{name: Widget() for name in
+                          ("headline", "summary", "progress_text", "folder_label")})
+    App._wrap_text(app, 580)
+    assert app.headline.options["wraplength"] == 540
+    assert app.summary.options["wraplength"] == 540
+    assert app.folder_label.options["wraplength"] == 360

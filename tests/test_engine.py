@@ -1,4 +1,7 @@
 from pathlib import Path
+import errno
+import hashlib
+import struct
 
 import pytest
 
@@ -316,3 +319,98 @@ def test_symlink_target_is_rejected(game, client, manifest, tmp_path):
     with pytest.raises(UpdaterError, match="Links"):
         installer(game, client).install(manifest)
     assert outside.read_bytes() == b"must not change"
+
+
+@pytest.mark.parametrize("damage", [b"", b"x" * 1024], ids=["empty", "replaced"])
+def test_damaged_dll_repairs_only_dll_and_preserves_local_edits(game, client, manifest, damage):
+    engine = installer(game, client)
+    engine.install(manifest)
+    (game / "d3d9.dll").write_bytes(damage)
+    (game / "dxvk.conf").write_bytes(b"personal config")
+    (game / "eldorado.dxvk-cache").write_bytes(b"locally expanded cache")
+    before = snapshot(game)
+    status = engine.check(manifest)
+    assert status.kind == "repair"
+    assert status.repair_files == ("d3d9.dll",)
+    client.calls.clear()
+    engine.install(manifest)
+    assert client.calls == ["d3d9.dll"]
+    assert (game / "dxvk.conf").read_bytes() == before["dxvk.conf"]
+    assert (game / "eldorado.dxvk-cache").read_bytes() == before["eldorado.dxvk-cache"]
+    assert engine.check(manifest).kind == "current"
+    engine.restore()
+    assert snapshot(game) == before
+
+
+def test_disk_full_rollback_skips_already_restored_cache(game, client, payloads, monkeypatch):
+    (game / "d3d9.dll").write_bytes(b"previous DLL")
+    (game / "dxvk.conf").write_bytes(b"old config")
+    (game / "eldorado.dxvk-cache").write_bytes(b"large local cache" * 20000)
+    before = snapshot(game)
+    body = b"s" * 20
+    entry = struct.pack("<I", (len(body) << 6) | 3) + hashlib.sha1(body, usedforsecurity=False).digest() + body
+    payloads["eldorado.dxvk-cache"] += entry * 5000
+    manifest = make_manifest("a" * 40, payloads, "larger cache")
+    engine = installer(game, client)
+    original_prepare, original_copy = engine._prepare, module.atomic_copy
+    prepared = False
+    def prepare(*args):
+        nonlocal prepared
+        result = original_prepare(*args)
+        prepared = True
+        return result
+    def limited_copy(source, target):
+        if prepared and target.parent == game and source.stat().st_size > 64 * 1024:
+            raise OSError(errno.ENOSPC, "64 KiB free after backups")
+        original_copy(source, target)
+    monkeypatch.setattr(engine, "_prepare", prepare)
+    monkeypatch.setattr(module, "atomic_copy", limited_copy)
+    with pytest.raises(UpdaterError, match="previous files were restored"):
+        engine.install(manifest)
+    assert snapshot(game) == before
+    assert not engine.store.journal_path.exists()
+    engine.recover()
+
+
+def test_reopen_cleans_prejournal_backups_and_partial_temp_files(game, client, manifest, monkeypatch):
+    engine = installer(game, client)
+    engine.install(manifest)
+    original_commit = engine._commit
+    keep = engine.store.state()["transaction_id"]
+    original = snapshot(game)
+    def crash(folder, record, actions):
+        (folder / "before" / ".dxvk-writing-interrupted").write_bytes(b"partial backup")
+        (folder / ".writing-interrupted").write_bytes(b"partial record")
+        raise KeyboardInterrupt("after backups, before journal")
+    monkeypatch.setattr(engine, "_commit", crash)
+    with pytest.raises(KeyboardInterrupt):
+        engine.install(manifest, repair=True)
+    assert len(list(engine.store.transactions.iterdir())) == 2
+    Installer(game, None, game_guard=lambda root: None).recover()
+    assert [p.name for p in engine.store.transactions.iterdir()] == [keep]
+    assert snapshot(game) == original
+    monkeypatch.setattr(engine, "_commit", original_commit)
+    engine.restore()
+    assert all(data is None for data in snapshot(game).values())
+
+
+def test_failed_recovery_keeps_backups_until_game_closes(game, client, manifest, monkeypatch):
+    engine = installer(game, client)
+    original_copy = module.atomic_copy
+    def crash(source, target):
+        if target == game / "dxvk.conf":
+            raise KeyboardInterrupt("after first replacement")
+        original_copy(source, target)
+    monkeypatch.setattr(module, "atomic_copy", crash)
+    with pytest.raises(KeyboardInterrupt):
+        engine.install(manifest)
+    monkeypatch.setattr(module, "atomic_copy", original_copy)
+    transactions = {p.name for p in engine.store.transactions.iterdir()}
+    def running(root):
+        raise UpdaterError("Close ElDewrito")
+    with pytest.raises(UpdaterError, match="Close"):
+        installer(game, None, running).recover()
+    assert engine.store.journal_path.exists()
+    assert {p.name for p in engine.store.transactions.iterdir()} == transactions
+    engine.recover()
+    assert not engine.store.journal_path.exists()

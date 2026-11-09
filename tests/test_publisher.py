@@ -108,15 +108,22 @@ def test_release_audit_rejects_case_collisions(tmp_path):
         audit_archive(archive)
 
 
-def test_release_never_publishes_unreviewed_existing_draft_assets(tmp_path):
+@pytest.fixture
+def release_files(tmp_path, monkeypatch):
     import hashlib
     from dxvk_updater import __version__
-    from scripts.publish_release import publish_release
+    monkeypatch.setenv("GITHUB_SHA", "a" * 40)
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
     archive = tmp_path / f"ElDewritoDXVKUpdater-{__version__}-windows-x64.zip"
     with zipfile.ZipFile(archive, "w") as output:
         output.writestr("App/ElDewritoDXVKUpdater.exe", b"synthetic")
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     archive.with_suffix(".zip.sha256").write_text(f"{digest}  {archive.name}\n")
+    return tmp_path
+
+
+def test_release_never_publishes_unreviewed_existing_draft_assets(release_files):
+    from scripts.publish_release import publish_release
     class DraftAPI:
         def __init__(self):
             self.writes = []
@@ -129,8 +136,40 @@ def test_release_never_publishes_unreviewed_existing_draft_assets(tmp_path):
             self.writes.append(file.name)
     api = DraftAPI()
     with pytest.raises(UpdaterError, match="draft"):
-        publish_release(api, tmp_path)
+        publish_release(api, release_files)
     assert api.writes == []
+
+
+@pytest.mark.parametrize("existing_draft", [False, True])
+def test_release_records_source_and_keeps_patch_release_latest(release_files, existing_draft):
+    from scripts.github_api import APIError
+    from scripts.publish_release import publish_release
+    class API:
+        def __init__(self):
+            self.writes, self.assets = [], []
+        def call(self, method, path, data=None):
+            if method == "GET":
+                if existing_draft:
+                    return {"id": 1, "draft": True, "assets": [], "body": "Existing draft"}
+                raise APIError(404, "not published")
+            self.writes.append((method, data))
+            return {"id": 1, "assets": [], "html_url": "https://example.test/release"}
+        def upload_asset(self, release, path):
+            self.assets.append(path.name)
+    api = API()
+    assert publish_release(api, release_files) == "https://example.test/release"
+    assert len(api.assets) == 2
+    assert api.assets[0].endswith(".zip") and api.assets[1].endswith(".zip.sha256")
+    assert all(data["make_latest"] == "false" for _, data in api.writes)
+    assert "https://github.com/duckfudge/eldewrito-dxvk-updater/tree/" + "a" * 40 in api.writes[-1][1]["body"]
+    assert api.writes[-1][1]["draft"] is False
+
+
+def test_release_refuses_missing_source_before_api_writes(release_files, monkeypatch):
+    from scripts.publish_release import publish_release
+    monkeypatch.delenv("GITHUB_SHA")
+    with pytest.raises(UpdaterError, match="source commit"):
+        publish_release(None, release_files)
 
 
 def test_release_tag_must_match_version(tmp_path, monkeypatch):
