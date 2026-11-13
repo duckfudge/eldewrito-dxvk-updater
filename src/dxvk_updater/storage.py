@@ -10,9 +10,37 @@ import stat
 import tempfile
 from pathlib import Path
 
-from .model import FILES, Manifest, UpdaterError, read_json, sha256_file
+from .model import FILES, HEX64, Manifest, UpdaterError, read_json, sha256_file
 
 ID_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
+
+
+@contextlib.contextmanager
+def file_lock(path, message):
+    safe_regular(path)
+    with path.open("a+b") as handle:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise UpdaterError(message) from exc
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def safe_regular(path: Path, *, directory=False, missing=True):
@@ -63,11 +91,21 @@ def atomic_copy(source: Path, destination: Path):
 def validate_state(value):
     if value is None:
         return None
-    if not isinstance(value, dict) or set(value) != {"schema_version", "manifest", "transaction_id"} or type(value["schema_version"]) is not int or value["schema_version"] != 1:
+    if not isinstance(value, dict) or type(value.get("schema_version")) is not int or value["schema_version"] not in (1, 2):
         raise UpdaterError("Installed patch records are damaged. Restore your .dxvk-updater backup.")
-    transaction = value["transaction_id"]
-    if transaction is not None and (not isinstance(transaction, str) or not ID_PATTERN.fullmatch(transaction)):
-        raise UpdaterError("Invalid transaction identifier in installed patch records.")
+    fields = {"schema_version", "manifest", "transaction_id"}
+    if value["schema_version"] == 2:
+        fields |= {"restore_id", "repair_id", "undo_restore", "suppressed_patch"}
+    if set(value) != fields:
+        raise UpdaterError("Installed patch records are damaged. Restore your .dxvk-updater backup.")
+    for key in ("transaction_id", "restore_id", "repair_id"):
+        transaction = value.get(key)
+        if transaction is not None and (not isinstance(transaction, str) or not ID_PATTERN.fullmatch(transaction)):
+            raise UpdaterError("Invalid transaction identifier in installed patch records.")
+    if value["schema_version"] == 2:
+        suppressed = value["suppressed_patch"]
+        if type(value["undo_restore"]) is not bool or suppressed is not None and (not isinstance(suppressed, str) or not HEX64.fullmatch(suppressed)):
+            raise UpdaterError("Invalid restore preferences in installed patch records.")
     if value["manifest"] is not None:
         Manifest.parse(value["manifest"])
     return value
@@ -119,31 +157,8 @@ class Store:
 
     @contextlib.contextmanager
     def lock(self):
-        path = self.meta / "lock"
-        safe_regular(path)
-        with path.open("a+b") as handle:
-            handle.seek(0, os.SEEK_END)
-            if handle.tell() == 0:
-                handle.write(b"0")
-                handle.flush()
-            handle.seek(0)
-            try:
-                if os.name == "nt":
-                    import msvcrt
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                else:
-                    import fcntl
-                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError as exc:
-                raise UpdaterError("Another updater is using this game folder. Close it and try again.") from exc
-            try:
-                yield
-            finally:
-                handle.seek(0)
-                if os.name == "nt":
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-                else:
-                    fcntl.flock(handle, fcntl.LOCK_UN)
+        with file_lock(self.meta / "lock", "Another updater is using this game folder. Close it and try again."):
+            yield
 
     def remove_transaction(self, transaction):
         # Only our fixed transaction layout is ever removed. No recursive deletion.
@@ -171,8 +186,9 @@ class Store:
         target.rmdir()
 
     def cleanup(self, keep):
+        keep = {keep} if isinstance(keep, str) else set(keep or ())
         for entry in self.transactions.iterdir():
-            if ID_PATTERN.fullmatch(entry.name) and entry.name != keep:
+            if ID_PATTERN.fullmatch(entry.name) and entry.name not in keep:
                 try:
                     self.remove_transaction(entry.name)
                 except (OSError, UpdaterError):

@@ -9,6 +9,7 @@ a = Analysis([str(root / 'launcher.py')], pathex=[str(root / 'src')],
              noarchive=False)
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='ElDewritoDXVKUpdater',
+          contents_directory='_dxvk_updater',
           debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
           console=False, disable_windowed_traceback=False)
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False,

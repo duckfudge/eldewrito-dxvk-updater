@@ -13,9 +13,6 @@ def settings_directory():
 
 
 def suggested_game():
-    beside = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path.cwd()
-    if (beside / "eldorado.exe").is_file():
-        return beside
     try:
         data = read_json((settings_directory() / "settings.json").read_bytes())
         game = Path(data["game_folder"])
@@ -23,6 +20,9 @@ def suggested_game():
             return game
     except (OSError, UpdaterError, KeyError, TypeError):
         pass
+    beside = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path.cwd()
+    if (beside / "eldorado.exe").is_file():
+        return beside
     return None
 
 

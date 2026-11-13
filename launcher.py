@@ -10,7 +10,14 @@ if not getattr(sys, 'frozen', False):
         os.environ.setdefault('TCL_LIBRARY', str(tcl / 'tcl8.6'))
         os.environ.setdefault('TK_LIBRARY', str(tcl / 'tk8.6'))
 
-from dxvk_updater.app import main
-
 if __name__ == "__main__":
+    from dxvk_updater.program_update import dispatch, ctypes_message
+    try:
+        result = dispatch()
+    except Exception as exc:
+        ctypes_message(str(exc))
+        raise SystemExit(1)
+    if result is not None:
+        raise SystemExit(result)
+    from dxvk_updater.app import main
     main()

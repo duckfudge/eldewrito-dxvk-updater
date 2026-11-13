@@ -1,27 +1,37 @@
 # ElDewrito DXVK Updater
 
-A Python desktop updater for the curated [ElDewrito DXVK patch](https://github.com/duckfudge/eldewrito-dxvk).
-It checks for updates when opened, asks before installing, and keeps a restore point.
-The target is ElDewrito 0.7 on Windows 10/11 x64; the game uses an **x86 DXVK DLL**.
+A portable Python updater for the curated [ElDewrito DXVK patch](https://github.com/duckfudge/eldewrito-dxvk).
+Checks when opened, asks before installation, and keeps recoverable backups.
+Targets stable ElDewrito 0.7 on Windows 10/11 x64; the game uses an **x86 DLL**.
 
-## For players
+## Players
 
-Download an **ElDewritoDXVKUpdater-…-windows-x64.zip** from the patch repository's
-[releases](https://github.com/duckfudge/eldewrito-dxvk/releases). Extract the entire
-folder and run `ElDewritoDXVKUpdater.exe`. Python is included. Choose the folder
-containing `eldorado.exe`, or put the updater beside it for automatic detection.
+Download the Windows x64 ZIP from [GitHub Releases](https://github.com/duckfudge/eldewrito-dxvk/releases).
+Extract the entire folder and run `ElDewritoDXVKUpdater.exe`; Python is bundled.
+**1.0.x users must install 1.1.0 manually once**, preferably in a fresh folder.
+Keep `_dxvk_updater` and the prefixed player documents beside the executable.
+A valid remembered game folder takes priority over detection beside the updater.
+Unknown/development game builds display a warning and require approval.
 
 - **Update now** installs changed upstream files and repairs missing files or a damaged DLL.
-- **Later** postpones installation; **Check again** refreshes the published patch.
-- **Repair patch** downloads and replaces all three managed files, with backups.
-- **Restore previous update** restores the last affected files, including which
-  files originally did not exist. Restoration also works offline.
+- **Later** postpones the patch until the next opening. **Check again** refreshes it.
+- **Repair patch** replaces all three managed files and retains a separate pre-repair backup.
+- **Restore previous update** returns to the previous patch revision. Repairs preserve that restore point.
+- **Undo restore** reverses restoration. Both actions also work offline.
+- A restored-away revision stays optional until different contents are offered. **Install anyway** remains available.
+- Program updates are offered first, with separate approval, verified replacement, and restart.
+  **Later** continues with compatible patches using the installed program.
 
-Only `d3d9.dll`, `dxvk.conf`, and `eldorado.dxvk-cache` are managed. Local cache
-growth and configuration edits do not trigger repeated updates. Repair or an
-upstream change to those files replaces the local copies after backing them up.
-Close ElDewrito before installing or restoring. The app has no tray service,
-telemetry, automatic installation, or publishing credentials.
+Only `d3d9.dll`, `dxvk.conf`, and `eldorado.dxvk-cache` are managed as patch files.
+Local config edits and cache growth do not repeatedly trigger updates. Repair or
+an upstream change replaces affected files after backup. Details shows the latest
+pre-repair backup location. Close ElDewrito before patch installation or restoration.
+
+Program replacement supports mixed game/updater folders and preserves unrelated
+files. It requests administrator approval only when the program folder needs it;
+the patch installer uses normal permissions and the interface restarts unelevated.
+The package is unsigned. There is no tray service, telemetry, unattended installation,
+or application publishing credential.
 
 ## Development
 
@@ -35,57 +45,60 @@ py -3.13 -m venv .venv
 .\.venv\Scripts\python.exe scripts/build_windows.py
 ```
 
-The one-folder PyInstaller build and ZIP appear in `dist/`. Keep all extracted
-files together: Python, Tcl/Tk, CustomTkinter assets, and license notices are
-included. `python launcher.py --game-dir "C:\Games\Halo Online"` selects a folder
-explicitly. Source code is licensed under [0BSD](LICENSE); dependencies retain
-their own licenses.
+ZIP and checksum appear in `dist/`. All dependencies are pinned. No new runtime
+dependency is needed for self-updating. `--game-dir "C:\Games\Halo Online"`
+selects a folder explicitly. Source is [0BSD](LICENSE); dependencies retain their
+licenses. Tests use synthetic files and never execute a game or contact GitHub.
+CI tests on Linux/Windows and builds the Windows package. Clean Windows 10/11
+without Python, actual DPI settings, and movement between monitors remain deferred
+release checks for 1.1.0 at the maintainer's request.
 
-Tests use temporary synthetic game folders and never execute a game or contact
-GitHub. CI tests on Linux and Windows and builds the Windows package. Run the
-suite when changing update logic or publishing behavior; include regression tests
-with bug fixes. Clean Windows 10/11 machines without Python and display scaling
-at 100%, 150%, and 200% still require manual release testing.
+## Publishing
 
-## How updates work
+Stage all three patch files and `patch-notes.json` on a branch, then merge to
+patch `main`. Notes contain exactly `title` and `summary`. Push, scheduled
+30-minute, and manual workflows validate the entire patch before publishing.
+Documentation/notes-only commits do not create patch revisions. The one-time
+schema upgrade preserves an unchanged patch's content ID and publication date.
+GitHub may delay schedules or disable them after 60 days of repository inactivity;
+the patch repository also has an independent push-only publisher.
 
-The patch repository's [push workflow](https://github.com/duckfudge/eldewrito-dxvk/blob/main/.github/workflows/publish-patch.yml)
-publishes when patch files change on `main`. The [scheduled workflow](.github/workflows/publish-patch.yml)
-also checks every 30 minutes and on manual runs. Both validate all three files and write
-`updates/manifest.json` only when their contents change. Documentation-only commits
-do not produce patch revisions. GitHub can delay schedules or disable them after
-60 days of source-repository inactivity; patch pushes use a separate push-only workflow.
+Schema-2 `updates/manifest.json` records a human title, notes, publication date,
+source commit, minimum updater version, content-derived patch ID, and each file's
+size/SHA-256. Downloads use that exact commit in a fixed repository. Old 1.0.x
+clients reject schema 2 and direct players to Releases; no legacy feed is kept.
+The publisher waits for the required application release before changing the feed.
+Validation checks bounded x86 PE structure, UTF-8 config, and cache record integrity
+(formats 8–15 and 17–18). It does not prove binary safety or GPU compatibility.
 
-The manifest identifies a source commit and contains filenames, sizes, SHA-256
-hashes, a content-derived patch ID, a publication date, and a short summary. The
-client downloads from that exact commit using a fixed GitHub repository. It
-rejects arbitrary paths, URLs, commands, oversized files, and checksum mismatches.
-DLL validation checks x86 PE headers and section bounds. Cache validation checks
-record boundaries and stored hashes for formats 8–15 and 17–18, including the
-current curated cache. These checks do not establish GPU compatibility or prove
-that a binary is safe; the patch publisher remains trusted.
+Program releases have a separate `updates/updater.json`, fixed release-asset URLs,
+SHA-256 checks, bounded ZIP extraction, and `DXVKUpdater-files.json` ownership.
+Only the executable, prefixed documents/licenses, and `_dxvk_updater` runtime
+files are replaced. Unlisted files are preserved and collisions abort replacement.
+Both publishers preserve other feed files and retry compare-and-swap conflicts.
+Program publication never downgrades the latest offered application version.
 
-Each selected game has its own `.dxvk-updater` state and backups. All downloads are
-verified before replacement. A per-game lock excludes concurrent updaters; a
-journal supports rollback after errors or interrupted updates. Saving the installed
-state commits a transaction. Recovery runs before the network check. Keep this
-directory intact while updating or recovering. A damaged backup stops restoration
-before any file is changed. Local backups can exceed the upstream download limits.
-Startup removes abandoned staging and backup transactions while preserving the
-current restore point. Recovery skips files already matching their verified backups.
+## Recovery
 
-HTTPS, commit pinning, and hashes protect transport integrity; the manifest is not
-independently signed. GitHub account and publishing-secret access determine who
-can publish a trusted patch. Managed files and metadata reject links and junctions.
-Network and installation work runs in a worker thread, with UI updates passed
-through a queue to Tkinter's main thread.
+Each game has `.dxvk-updater` state, backups, a per-game lock, and a journal.
+Downloads are verified before replacement. Saving installed state commits a change;
+interrupted operations roll back before network access. Previous-revision and
+pre-repair backups are retained separately. A damaged backup stops restoration
+before writes. Local caches can exceed upstream download limits.
+Legacy state is recovered before migration to schema 2; the original record is
+kept as `installed-1.0-backup.json`. Do not run older updaters against migrated
+folders or restore that metadata file alone. Deleted backups cannot be recreated.
 
-## Repository layout
+Program replacement runs from a cloned helper outside the installation directory.
+An unelevated broker restarts the interface; failed startup restores the old program.
+UAC preparation independently downloads into restricted ProgramData staging and
+never elevates a user-writable cached helper. Keep `DXVKUpdater-update.json` and
+its matching update cache intact during recovery. Reopening resumes recovery.
+Completed caches for that installation are collected before its next program update.
 
-- `src/dxvk_updater/`: interface, protocol, downloads, settings, and recovery.
-- `scripts/`: patch publishing, Windows packaging, and application releases.
-- `tests/`: installation, failure recovery, validation, UI state, and publisher tests.
-- `.github/workflows/`: test/build and scheduled patch publication.
+HTTPS and hashes protect transport integrity; feeds are not independently signed.
+GitHub and publishing-secret access determine who can publish trusted updates.
+Network/install work uses worker threads and queued UI messages. Logs remain local.
 
-See [publishing and maintenance](docs/MAINTENANCE.md) for credential setup,
-releasing a new updater, handling workflow failures, and reverting a bad patch.
+See [publishing and maintenance](docs/MAINTENANCE.md) for credentials, releases,
+failed workflows, recovery, and reverting a patch.

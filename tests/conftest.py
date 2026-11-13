@@ -1,4 +1,7 @@
 import struct
+import hashlib
+import json
+import zipfile
 
 import pytest
 from dxvk_updater.model import make_manifest
@@ -52,3 +55,32 @@ class MemoryClient:
 @pytest.fixture
 def client(payloads):
     return MemoryClient(payloads)
+
+
+@pytest.fixture
+def bundle_factory():
+    def create(root, version="1.1.0", content=b"old program"):
+        root.mkdir(parents=True)
+        (root / "_dxvk_updater").mkdir()
+        files = {"ElDewritoDXVKUpdater.exe": content,
+                 "_dxvk_updater/python313.dll": b"synthetic runtime " + content,
+                 "DXVKUpdater-README.txt": b"player documentation"}
+        for name, data in files.items():
+            (root / name).write_bytes(data)
+        inventory = {"schema_version": 1, "version": version,
+                     "files": [{"path": name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+                               for name, data in files.items()]}
+        (root / "DXVKUpdater-files.json").write_text(json.dumps(inventory), encoding="utf-8")
+        return root
+    return create
+
+
+@pytest.fixture
+def zip_bundle():
+    def create(bundle, target):
+        with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+            for path in bundle.rglob("*"):
+                if path.is_file():
+                    archive.write(path, "ElDewritoDXVKUpdater/" + path.relative_to(bundle).as_posix())
+        return target
+    return create
