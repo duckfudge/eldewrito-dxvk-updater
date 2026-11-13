@@ -1,97 +1,113 @@
 # Publishing and maintenance
 
-## Publishing credentials
+## Credentials and workflows
 
-Application source and workflows live in `duckfudge/eldewrito-dxvk-updater`.
-Patch files, generated metadata, and player downloads live in
-`duckfudge/eldewrito-dxvk`.
+Source/workflows: `duckfudge/eldewrito-dxvk-updater` (public, 0BSD).
+Patch files, feeds, and packaged downloads: `duckfudge/eldewrito-dxvk`.
 
-1. Create a fine-grained GitHub token restricted to the **patch repository** with
-   **Contents: read and write**. It does not need access to the updater repository.
-2. Store it in the updater repository's Actions secrets as `PUBLISH_TOKEN`.
-   Choose an expiration date, record the renewal date privately, and replace the
-   secret before it expires. Never commit the token or pass it on a command line.
-3. Run **Publish patch feed** with **dry_run** enabled to validate the current
-   patch. Turn dry run off to publish its manifest to the `updates` branch.
+Create a fine-grained token restricted to the patch repository with **Contents:
+read/write**. Store it only as updater Actions secret `PUBLISH_TOKEN`, record its
+expiry privately, and renew before expiry. Never commit or print it. Pull-request
+and fork builds have no publishing access. The patch repository's push publisher
+uses its short-lived `GITHUB_TOKEN` and requires no stored publisher credential.
 
-The default workflow token cannot write another repository. The publisher secret
-is passed only to publishing steps in the canonical updater repository. Source
-checkout is read-only and does not persist credentials. Pull-request builds and
-fork builds can run tests and packaging without publishing access.
+The scheduled publisher checks at minutes 17 and 47 each hour; manual runs offer
+a dry run. GitHub can delay schedules or disable them after 60 days of repository
+inactivity. The separate patch push publisher remains available. Concurrency is
+serialized per repository; cross-repository conflicts get three fresh attempts.
+Feed writes preserve unrelated files and never force-push.
 
-## Publish a patch change
+## Publish a patch
 
-Commit compatible versions of `d3d9.dll`, `dxvk.conf`, and `eldorado.dxvk-cache`
-together on patch `main`. The patch repository's
-[`Publish patch changes` workflow](https://github.com/duckfudge/eldewrito-dxvk/blob/main/.github/workflows/publish-patch.yml)
-runs on those file changes. It checks out the public updater source and uses its
-own short-lived `GITHUB_TOKEN` with Contents write permission, so that path needs
-no stored publishing credential. It also has a manual trigger.
+Stage compatible `d3d9.dll`, `dxvk.conf`, `eldorado.dxvk-cache`, and
+`patch-notes.json` on a branch, test them together, then merge to patch `main`.
+Notes have exactly `title` (1–100 characters) and `summary` (up to 2000 characters):
 
-The updater repository's scheduled publisher checks at minutes 17 and 47 each hour;
-use **Run workflow** to check sooner. GitHub can delay or disable scheduled runs,
-including after 60 days without activity in the updater repository. The separate
-push-only workflow continues to handle patch changes without relying on that schedule.
+```json
+{"title": "ElDewrito 0.7 DXVK patch", "summary": "Describe the player-visible change."}
+```
 
-The publisher calculates revision IDs and hashes automatically, pins downloads
-to the source commit, and preserves the previous feed on validation failure.
-Documentation changes and repeated checks do not create revisions. Publishing
-jobs are serialized and inspect the current source when they start. A concurrent
-feed update is rejected rather than overwritten.
+Push, schedule, or manual publication validates the complete current main revision.
+Only changed patch contents create patch revisions. Notes/documentation-only
+commits do not republish an unchanged schema-2 patch; edit notes alongside the next
+payload change. Invalid files preserve the previous published feed. The initial
+schema-2 migration preserves an unchanged patch's ID and original publication date.
+Do not edit generated `updates/manifest.json` or `updates/updater.json` manually.
 
-Use the curated **x86** DLL, not an x64 DXVK DLL. The initial DLL came from the
-patch repository's `0525` release. Validation checks PE structure, readable config,
-and cache record integrity. Supported cache formats are 8–15 and 17–18; a new
-format needs a validator update and a compatible updater release first. Validation
-does not replace testing the complete patch in ElDewrito.
+Use the curated x86 DLL; the initial DLL came from release `0525`. Cache formats
+8–15 and 17–18 are supported. A new format needs client validation support first.
+Validation does not establish binary safety, GPU compatibility, or correct gameplay.
+Do not force-push/delete published source history; clients use commit-pinned URLs.
 
-Do not force-push or delete published source history: clients use commit-pinned
-URLs. Do not hand-edit `updates/manifest.json`.
+## Publish the application
 
-## Publish an updater release
+1. Update the version in `src/dxvk_updater/__init__.py` and release summary in
+   `scripts/publish_release.py`; keep dependency pins consistent when changing them.
+2. Run pytest and build on Windows using README commands. Smoke-test the complete
+   extracted package, normal replacement/restart, failed startup, crash recovery,
+   mixed folders, and administrator-assisted replacement.
+3. Push matching tag `updater-vX.Y.Z`, or run Test and build updater with publish
+   enabled. A tag/version mismatch aborts publication. Builds test Linux/Windows.
+4. Verify the public ZIP/checksum, program feed, and patch feed, then update the
+   player download link if needed. Latest DXVK patch release designation stays unchanged.
 
-1. Update `__version__` in `src/dxvk_updater/__init__.py`; package metadata and release
-   filenames derive from it. Keep dependency pins consistent in `pyproject.toml`
-   and the requirements files when updating dependencies.
-2. Run tests and build on Windows using the README commands. Test the extracted
-   package on Windows 10/11 without Python, including high-DPI display settings.
-3. Push a matching `updater-vX.Y.Z` tag, or run **Test and build updater** manually
-   with **publish** enabled. A tag/version mismatch aborts publication.
-4. Update the player download link in the patch repository's README if necessary.
+The release script audits the ZIP paths, ownership inventory, hashes, runtime,
+source/settings exclusions, and recognizable GitHub credential patterns. This is
+not a general secret scanner. Only ZIP/checksum assets are uploaded, first to a
+draft and then published with `make_latest=false`. GitHub's uploaded asset digest
+must match before the program feed is published. Source links pin `GITHUB_SHA`.
+The program feed cannot downgrade versions or reuse a version for different bytes.
 
-The workflow tests Linux and Windows before building. The release script verifies
-the ZIP checksum and audits its paths, duplicate names, source/settings exclusions,
-and recognizable GitHub credential patterns. This is a packaging safeguard, not
-a general-purpose secret scanner. It uploads a ZIP and SHA-256 file to a draft,
-then publishes with `make_latest=false` so the latest DXVK patch designation stays
-unchanged. An existing release is never replaced. Review and remove any incomplete
-draft containing assets before retrying; existing draft assets are never published
-without review. Releases link the exact updater source commit from `GITHUB_SHA`;
-use the build workflow to publish. Application source remains available in this repository.
+Existing published assets are never replaced. Retrying after a feed-write failure
+requires the same source link, complete assets, and re-download/re-audit of the
+actual public ZIP. An incomplete draft with assets must be reviewed and removed
+before retrying; unreviewed draft assets are never published automatically.
 
-## Revert a bad patch
+The patch feed waits until the minimum updater is public. Schema 2 requires
+1.1.0 and stops 1.0.x clients; no parallel legacy feed is kept. Players manually
+install the first self-updating version once. Prefer a fresh folder. Never delete
+generic `_internal`, README, or license files from a mixed game directory because
+their ownership cannot be established. New runtime/documents use unique names.
 
-Restore the desired patch files on `main` in a **new commit** and run **Publish patch
-feed**. Reverting file contents produces their earlier content ID and prompts
-players whose installed upstream hashes differ. Players can also use **Restore
-previous update** while waiting. Commit hashes are not used to infer version order.
+Clean Windows 10/11 guests without Python and actual DPI/multiple-monitor checks
+are deferred for 1.1.0 by the maintainer. Record that limitation in release notes;
+package/runtime checks on a Python-equipped host do not replace those tests.
+The package remains unsigned.
 
-## Troubleshooting
+## Revert a patch
 
-- **HTTP 401/403:** check token expiry, selected repository, Contents permission,
-  and branch rules. Renew the Actions secret if needed.
-- **Invalid patch:** fix the complete file set and rerun. Git LFS pointer text is
-  rejected; ordinary GitHub files are required. The previous feed remains active.
-- **Source changed during validation:** publication is deferred; rerun or wait
-  for the next scheduled check.
-- **Non-fast-forward feed update:** another publisher won the race; rerun against
-  current source. The workflow does not force-update the feed.
-- **File locks or permissions:** close ElDewrito and other programs holding the
-  files, then retry. The app never kills a process or silently elevates itself.
-- **Interrupted installation:** reopen with the game closed. Recovery works
-  offline. Keep `.dxvk-updater` intact until recovery completes.
-- **Damaged restore point:** retain the files and metadata and recover from a
-  separate backup. Unverified backups are never restored.
+Restore the desired three files on a branch, merge a **new commit** to main, and
+publish. Restored contents regain their previous content ID; commit hashes do not
+imply version order. Players can Restore previous update while waiting. Repairs
+preserve that previous-revision checkpoint and retain a separate latest repair
+backup. Undo restore reverses restoration. Restoring away suppresses that offered
+revision until different contents appear; explicit installation remains available.
 
-Rotating player logs and the remembered folder are stored locally under
-`%LOCALAPPDATA%/ElDewritoDXVKUpdater`. Logs are not uploaded automatically.
+## Failures and recovery
+
+- HTTP 401/403: check token expiry, selected repo, Contents permission, and branch rules.
+- Invalid patch: fix the full set and retry. Git LFS pointer text is rejected.
+- Source moved: rerun or wait for the next schedule; a moving source is deferred.
+- Feed conflict: retry after three automatic attempts; the feed is never forced.
+- Patch file locks: close ElDewrito/lock holders, then reopen. Recovery works offline.
+- Damaged backup: preserve metadata/files and use a separate backup. No unverified
+  backup is restored. Legacy records recover before migration; do not run an old
+  updater against migrated state or restore `installed-1.0-backup.json` alone.
+- Personal edits before Repair: Details shows the retained transaction's `before`
+  directory. `record.json` records file existence and hashes. With the game closed,
+  manually copy desired verified files if recovering those edits.
+- Program recovery: retain `DXVKUpdater-update.json` and its UUID cache in
+  LocalAppData or protected ProgramData. Reopening dispatches the saved runner
+  before importing Tk. Close other updater windows and retry. The broker can stop
+  only its own newly started, unacknowledged child after a startup timeout so
+  rollback can release file locks. It never kills the game or unrelated windows.
+- UAC staging: only the installed app requests elevation; it independently fetches
+  the fixed program feed/ZIP. Protected staging restricts writes to administrators
+  and system, allows user read/execute, and restricts implicit owner rights.
+  Unsafe pre-existing cache permissions are refused. Preparation errors are saved
+  as `error.txt` inside the protected job when available. Cached user-writable
+  helpers are never elevated; an unelevated broker restarts the interface.
+
+Rotating logs/settings are local under `%LOCALAPPDATA%/ElDewritoDXVKUpdater`.
+Completed program caches for an installation are collected before its next update;
+pending recovery and running helpers are preserved. Nothing is uploaded automatically.
