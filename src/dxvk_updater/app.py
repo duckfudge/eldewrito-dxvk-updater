@@ -20,7 +20,7 @@ from .game import game_support
 from .model import FILES, RELEASES_URL, UpdaterError
 from .network import FeedClient
 from .settings import remember_game, settings_directory, suggested_game
-from .program_update import fetch_program, prepare_update, handoff
+from .program_update import fetch_program, prepare_update, handoff, cancel_prepared
 
 BG = "#0B1018"
 PANEL = "#111B28"
@@ -257,7 +257,10 @@ class App(ctk.CTk):
                         self._render()
                     elif operation == "program":
                         try:
-                            handoff(result)
+                            if self.closing:
+                                cancel_prepared(result)
+                            else:
+                                handoff(result)
                         except Exception as exc:
                             self.events.put(("error", str(exc)))
                             continue
@@ -319,6 +322,9 @@ class App(ctk.CTk):
         if status and status.installed:
             self.installed_value.configure(text=status.installed.title)
             self.installed_date.configure(text=f"{status.installed.patch_id[:10]} · {status.installed.published_at[:10]}")
+        elif self.game and self.check_error and status is None:
+            self.installed_value.configure(text="Not checked")
+            self.installed_date.configure(text="Game folder needs attention")
         else:
             self.installed_value.configure(text="Not managed yet" if self.game else "No folder selected")
             self.installed_date.configure(text="Ready for first installation" if self.game else "Select your ElDewrito folder")
@@ -386,27 +392,40 @@ class App(ctk.CTk):
         self.manifest = None
         self.status = None
         self.local_status = None
+        self.program = None
         self.available_value.configure(text="Checking…")
         self.available_date.configure(text="Connecting to GitHub")
         self.progress.set(0)
         def work():
             client = FeedClient()
             try:
-                engine = Installer(game, client, self.emit) if game else None
-                if engine:
-                    self.events.put(("local_status", engine.check()))
-                    self.events.put(("game_info", game_support(game)))
-                program, error = None, ""
+                engine, status, error = None, None, ""
+                try:
+                    if game:
+                        engine = Installer(game, client, self.emit)
+                        status = engine.check()
+                        self.events.put(("local_status", status))
+                        self.events.put(("game_info", game_support(game)))
+                except (OSError, UpdaterError) as exc:
+                    engine, error = None, str(exc)
+                    self.emit(f"Could not check the game folder: {exc}")
+                program = None
                 try:
                     program = fetch_program(client)
-                except UpdaterError as exc:
+                except (OSError, UpdaterError) as exc:
                     self.emit(f"Program update check unavailable: {exc}")
+                if game and engine is None:
+                    return None, None, program, error
                 self.emit("Checking the latest published patch…")
                 try:
                     manifest = client.fetch_manifest()
-                    status = engine.check(manifest) if engine else None
-                except UpdaterError as exc:
-                    manifest, status, error = None, engine.check() if engine else None, str(exc)
+                except (OSError, UpdaterError) as exc:
+                    manifest, error = None, str(exc)
+                else:
+                    try:
+                        status = engine.check(manifest) if engine else None
+                    except (OSError, UpdaterError) as exc:
+                        manifest, status, error = None, None, str(exc)
                 return manifest, status, program, error
             finally:
                 client.close()

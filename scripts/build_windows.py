@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from dxvk_updater import __version__
-from dxvk_updater.bundle import INVENTORY, extract_bundle, parse_inventory
+from dxvk_updater.bundle import INVENTORY, MAX_MEMBERS, MAX_UNPACKED, MAX_ZIP, extract_bundle, parse_inventory
 
 
 def build_environment():
@@ -33,8 +33,12 @@ def build_environment():
 
 
 def audit_archive(path):
+    if path.stat().st_size > MAX_ZIP:
+        raise ValueError("The distribution ZIP is too large")
     with zipfile.ZipFile(path) as archive:
         entries = archive.infolist()
+        if not 2 <= len(entries) <= MAX_MEMBERS + 1 or any(info.file_size > MAX_ZIP for info in entries) or sum(info.file_size for info in entries) > MAX_UNPACKED:
+            raise ValueError("The unpacked distribution is too large")
         # ZipInfo.filename can normalize separators or truncate at a NUL on Windows.
         names = [entry.orig_filename for entry in entries]
         roots = {name.split("/", 1)[0] for name in names}
@@ -63,8 +67,6 @@ def audit_archive(path):
                     if re.search(rb"(?:github_pat_[A-Za-z0-9_]{40,}|gh[pousr]_[A-Za-z0-9]{36,})", block):
                         raise ValueError(f"Possible GitHub credential in distribution: {name}")
                     tail = block[-256:]
-        if archive.testzip():
-            raise ValueError("The distribution ZIP is corrupt")
     with tempfile.TemporaryDirectory(prefix="dxvk-bundle-audit-") as temporary:
         extract_bundle(path, Path(temporary) / "payload", __version__)
 

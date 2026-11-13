@@ -4,7 +4,11 @@ from types import SimpleNamespace
 
 import pytest
 
+import dxvk_updater.app as module
 from dxvk_updater.app import App
+from dxvk_updater.engine import Status
+from dxvk_updater.model import UpdaterError
+from dxvk_updater.program_update import ProgramRelease
 
 
 class Widget:
@@ -131,3 +135,122 @@ def test_close_during_operation_exits_after_safe_completion():
     app.events.put(("done", ("restore", None)))
     App._poll(app)
     assert destroyed == [True]
+
+
+@pytest.mark.parametrize("closing", [False, True])
+def test_prepared_program_handoff_respects_close(monkeypatch, closing):
+    app = ui(None)
+    app.operation, app.closing = "program", closing
+    job, actions = object(), []
+    monkeypatch.setattr(module, "handoff", lambda result: actions.append(("handoff", result)))
+    monkeypatch.setattr(module, "cancel_prepared", lambda result: actions.append(("cancel", result)))
+    app.destroy = lambda: actions.append(("destroy", None))
+    app.events.put(("done", ("program", job)))
+    App._poll(app)
+    assert actions == [("cancel" if closing else "handoff", job), ("destroy", None)]
+
+
+def run_check(app):
+    app.busy = False
+    app.emit = lambda text: app.events.put(("progress", (text, None)))
+    app._run = lambda operation, work: app.events.put(("done", (operation, work())))
+    App.check(app)
+    App._poll(app)
+
+
+@pytest.mark.parametrize("failure", ["construct", "recover", "after_feed"])
+def test_game_errors_preserve_program_offer_and_clear_patch_actions(monkeypatch, game, manifest, failure):
+    app = ui(manifest)
+    app.game = game
+    stale = Status("update", manifest, (), (), True)
+    app.status = app.local_status = stale
+    program = ProgramRelease("1.2.0", "a" * 40, 100, "b" * 64,
+                             "2026-11-13T00:00:00+00:00", "Program notes")
+    calls = []
+
+    class Engine:
+        def __init__(self, *args):
+            calls.append("construct")
+            if failure == "construct":
+                raise PermissionError("Game folder is read-only")
+
+        def check(self, available=None):
+            calls.append("recover" if available is None else "after_feed")
+            if failure == ("recover" if available is None else "after_feed"):
+                raise UpdaterError("Recovery journal is damaged")
+            return Status("offline", manifest, (), (), True)
+
+    def fetch_patch():
+        calls.append("patch")
+        return manifest
+
+    def fetch_program(client):
+        calls.append("program")
+        return program
+
+    client = SimpleNamespace(fetch_manifest=fetch_patch, close=lambda: calls.append("close"))
+    monkeypatch.setattr(module, "Installer", Engine)
+    monkeypatch.setattr(module, "FeedClient", lambda: client)
+    monkeypatch.setattr(module, "fetch_program", fetch_program)
+    monkeypatch.setattr(module, "game_support", lambda game: ("supported", True))
+    run_check(app)
+    assert calls == ({
+        "construct": ["construct", "program", "close"],
+        "recover": ["construct", "recover", "program", "close"],
+        "after_feed": ["construct", "recover", "program", "patch", "after_feed", "close"],
+    }[failure])
+    assert app.program == program
+    assert app.manifest is app.status is app.local_status is None
+    assert app.check_error
+    assert app.installed_value.options["text"] == "Not checked"
+    assert app.update_button.options["state"] == "normal"
+    assert app.update_button.options["text"] == "Update program"
+    assert app.repair_button.options["state"] == app.restore_button.options["state"] == "disabled"
+    App.later(app)
+    assert app.update_button.options["state"] == "disabled"
+    assert app.summary.options["text"] == app.check_error
+
+
+@pytest.mark.parametrize("failed_feed", ["program", "patch"])
+def test_feed_errors_keep_independent_results(monkeypatch, game, manifest, failed_feed):
+    app = ui(manifest)
+    app.game = game
+    local = Status("offline", manifest, (), (), True)
+    updated = Status("update", manifest, ("dxvk.conf",), (), True)
+    program = ProgramRelease("1.2.0", "a" * 40, 100, "b" * 64,
+                             "2026-11-13T00:00:00+00:00", "Program notes")
+    calls = []
+
+    def check(available=None):
+        calls.append("local" if available is None else "compare")
+        return local if available is None else updated
+
+    def fetch_patch():
+        calls.append("patch")
+        if failed_feed == "patch":
+            raise UpdaterError("Patch feed unavailable")
+        return manifest
+
+    def fetch_program(client):
+        calls.append("program")
+        if failed_feed == "program":
+            raise UpdaterError("Program feed unavailable")
+        return program
+
+    client = SimpleNamespace(fetch_manifest=fetch_patch, close=lambda: calls.append("close"))
+    monkeypatch.setattr(module, "Installer", lambda *args: SimpleNamespace(check=check))
+    monkeypatch.setattr(module, "FeedClient", lambda: client)
+    monkeypatch.setattr(module, "fetch_program", fetch_program)
+    monkeypatch.setattr(module, "game_support", lambda game: ("supported", True))
+    run_check(app)
+    assert calls == ["local", "program", "patch", *(["compare"] if failed_feed == "program" else []), "close"]
+    if failed_feed == "program":
+        assert app.program is None
+        assert app.manifest == manifest and app.status == updated
+        assert app.repair_button.options["state"] == "normal"
+    else:
+        assert app.program == program
+        assert app.manifest is None and app.status == local
+        App.later(app)
+        assert app.repair_button.options["state"] == "disabled"
+    assert app.restore_button.options["state"] == "normal"
