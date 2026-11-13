@@ -118,6 +118,41 @@ def test_release_audit_rejects_case_collisions(tmp_path):
         audit_archive(archive)
 
 
+@pytest.mark.parametrize("limit", ["archive", "member", "unpacked", "count"])
+def test_release_audit_checks_limits_before_reading_members(tmp_path, monkeypatch, limit):
+    from scripts import build_windows
+    archive = tmp_path / "build.zip"
+    with zipfile.ZipFile(archive, "w") as output:
+        output.writestr("ElDewritoDXVKUpdater/ElDewritoDXVKUpdater.exe", b"synthetic")
+        output.writestr("ElDewritoDXVKUpdater/DXVKUpdater-files.json", b"{}")
+    if limit == "member":
+        original = zipfile.ZipFile.infolist
+        def oversized(self):
+            entries = original(self)
+            entries[-1].file_size = build_windows.MAX_ZIP + 1
+            return entries
+        monkeypatch.setattr(zipfile.ZipFile, "infolist", oversized)
+    else:
+        name, value = {"archive": ("MAX_ZIP", archive.stat().st_size - 1),
+                       "unpacked": ("MAX_UNPACKED", 1), "count": ("MAX_MEMBERS", 0)}[limit]
+        monkeypatch.setattr(build_windows, name, value)
+    def unexpected_read(*args, **kwargs):
+        raise AssertionError("Oversized archives must fail before decompression")
+    monkeypatch.setattr(zipfile.ZipFile, "open", unexpected_read)
+    with pytest.raises(ValueError, match="too large"):
+        audit_archive(archive)
+
+
+def test_release_audit_still_checks_crc_without_second_scan(tmp_path):
+    archive = tmp_path / "build.zip"
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_STORED) as output:
+        output.writestr("ElDewritoDXVKUpdater/ElDewritoDXVKUpdater.exe", b"unique synthetic executable")
+        output.writestr("ElDewritoDXVKUpdater/DXVKUpdater-files.json", b"{}")
+    archive.write_bytes(archive.read_bytes().replace(b"unique synthetic executable", b"broken synthetic executable", 1))
+    with pytest.raises(zipfile.BadZipFile, match="CRC"):
+        audit_archive(archive)
+
+
 @pytest.fixture
 def release_files(tmp_path, monkeypatch, bundle_factory, zip_bundle):
     import hashlib
@@ -129,6 +164,102 @@ def release_files(tmp_path, monkeypatch, bundle_factory, zip_bundle):
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     archive.with_suffix(".zip.sha256").write_text(f"{digest}  {archive.name}\n")
     return tmp_path
+
+
+@pytest.fixture
+def public_release(release_files, manifest, monkeypatch):
+    import hashlib
+    from types import SimpleNamespace
+    from dxvk_updater.network import FeedClient
+    from scripts import publish_release
+    from scripts.github_api import APIError
+    archive = next(release_files.glob("*.zip"))
+    class PublicAPI:
+        def __init__(self):
+            self.payload = archive.read_bytes()
+            self.downloads, self.writes = [], []
+            self.fail_feed = False
+            self.feed = {"manifest.json": manifest.to_dict()}
+            self.release = {"draft": False, "html_url": "https://example.test/release",
+                            "published_at": "2026-11-13T00:00:00+00:00",
+                            "body": "https://github.com/duckfudge/eldewrito-dxvk-updater/tree/" + "a" * 40,
+                            "assets": [{"name": file.name, "size": file.stat().st_size, "state": "uploaded",
+                                        "digest": "sha256:" + hashlib.sha256(file.read_bytes()).hexdigest()}
+                                       for file in (archive, archive.with_suffix(".zip.sha256"))]}
+        def call(self, method, path, *args):
+            assert method == "GET", "Public releases must never be modified on retry"
+            return self.release
+        def upload_asset(self, *args):
+            raise AssertionError("Public assets must never be replaced")
+        def feed_head(self):
+            return "b" * 40
+        def read_feed_file(self, name, head):
+            return self.feed.get(name)
+        def write_feed(self, files, parent, message):
+            if self.fail_feed:
+                self.fail_feed = False
+                raise APIError(500, "Injected feed failure")
+            self.writes.append(files)
+            self.feed.update(files)
+        def get(self, url, **kwargs):
+            self.downloads.append(url)
+            return SimpleNamespace(status_code=200, url=url, close=lambda: None,
+                                   iter_content=lambda chunk_size: iter([self.payload]))
+        def close(self):
+            pass
+    api = PublicAPI()
+    monkeypatch.setattr(publish_release, "program_client", lambda: FeedClient(api))
+    return api
+
+
+def test_public_release_retry_uses_original_zip_after_feed_failure(public_release, release_files, bundle_factory, zip_bundle):
+    import hashlib
+    from dxvk_updater import __version__
+    from scripts.github_api import APIError
+    from scripts.publish_release import publish_release
+    api = public_release
+    before = json.dumps(api.release, sort_keys=True)
+    prior_patch = api.feed["manifest.json"]
+    api.fail_feed = True
+    with pytest.raises(APIError, match="Injected feed failure"):
+        publish_release(api, release_files)
+    assert not api.writes
+    archive = next(release_files.glob("*.zip"))
+    zip_bundle(bundle_factory(release_files / "rebuilt", __version__, b"different rebuilt executable"), archive)
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    archive.with_suffix(".zip.sha256").write_text(f"{digest}  {archive.name}\n")
+    assert publish_release(api, release_files) == api.release["html_url"]
+    assert api.feed["updater.json"]["sha256"] == hashlib.sha256(api.payload).hexdigest() != digest
+    assert api.feed["manifest.json"] == prior_patch
+    assert json.dumps(api.release, sort_keys=True) == before
+    assert len(api.downloads) == 2 and len(api.writes) == 1
+
+
+@pytest.mark.parametrize("damage", ["missing_digest", "bad_checksum", "bad_source", "changed_download", "invalid_zip"])
+def test_public_release_retry_rejects_invalid_assets_without_feed_writes(public_release, release_files, damage):
+    import hashlib
+    from scripts.publish_release import publish_release
+    api = public_release
+    before = dict(api.feed)
+    archive, checksum = api.release["assets"]
+    if damage == "missing_digest":
+        del archive["digest"]
+    elif damage == "bad_checksum":
+        checksum["digest"] = "sha256:" + "0" * 64
+    elif damage == "bad_source":
+        api.release["body"] = "Wrong source"
+    elif damage == "changed_download":
+        api.payload = api.payload[:-1] + bytes([api.payload[-1] ^ 1])
+    else:
+        api.payload = b"not a ZIP archive"
+        digest = hashlib.sha256(api.payload).hexdigest()
+        archive.update(size=len(api.payload), digest="sha256:" + digest)
+        text = f"{digest}  {archive['name']}\n".encode("ascii")
+        checksum.update(size=len(text), digest="sha256:" + hashlib.sha256(text).hexdigest())
+    with pytest.raises((UpdaterError, zipfile.BadZipFile)):
+        publish_release(api, release_files)
+    assert api.feed == before and not api.writes
+    assert bool(api.downloads) == (damage in {"changed_download", "invalid_zip"})
 
 
 def test_release_never_publishes_unreviewed_existing_draft_assets(release_files):
@@ -282,3 +413,37 @@ def test_program_publisher_refuses_downgrade_and_same_version_replacement():
     publish_program(Feed(), original)
     with pytest.raises(UpdaterError, match="different contents"):
         publish_program(Feed(), replace(original, sha256="d" * 64))
+
+
+@pytest.mark.parametrize("newer_wins", [False, True])
+def test_program_feed_conflict_rereads_head_and_preserves_patch(manifest, newer_wins):
+    from dataclasses import replace
+    from dxvk_updater.program_update import ProgramRelease
+    from scripts.github_api import APIError
+    from scripts.publish_release import publish_program
+    program = ProgramRelease("1.1.1", "a" * 40, 100, "b" * 64, "2026-11-13T00:00:00+00:00", "notes")
+    newer = replace(program, version="1.2.0")
+    class Feed:
+        def __init__(self):
+            self.head, self.parents = "c" * 40, []
+            self.files = {"manifest.json": manifest.to_dict()}
+        def feed_head(self):
+            return self.head
+        def read_feed_file(self, name, parent):
+            assert parent == self.head
+            return self.files.get(name)
+        def write_feed(self, files, parent, message):
+            self.parents.append(parent)
+            if len(self.parents) == 1:
+                self.head = "d" * 40
+                self.files["manifest.json"] = replace(manifest, summary="Concurrent patch update").to_dict()
+                if newer_wins:
+                    self.files["updater.json"] = newer.to_dict()
+                raise APIError(422, "Concurrent feed update")
+            assert parent == self.head
+            self.files.update(files)
+    api = Feed()
+    publish_program(api, program)
+    assert api.parents == (["c" * 40] if newer_wins else ["c" * 40, "d" * 40])
+    assert api.files["manifest.json"]["summary"] == "Concurrent patch update"
+    assert api.files["updater.json"] == (newer if newer_wins else program).to_dict()
