@@ -17,6 +17,9 @@ class Status:
     changed: tuple[str, ...]
     repair_files: tuple[str, ...]
     can_restore: bool
+    undo_restore: bool = False
+    suppressed: bool = False
+    repair_id: str | None = None
 
 
 class Installer:
@@ -32,7 +35,7 @@ class Installer:
         record_path = folder / "record.json"
         safe_regular(record_path, missing=False)
         record = read_json(record_path.read_bytes())
-        if set(record) != {"schema_version", "id", "before_state", "desired_state", "entries"} or type(record["schema_version"]) is not int or record["schema_version"] != 1 or record["id"] != transaction:
+        if set(record) != {"schema_version", "id", "before_state", "desired_state", "entries"} or type(record["schema_version"]) is not int or record["schema_version"] not in (1, 2) or record["id"] != transaction:
             raise UpdaterError("The recovery journal is damaged.")
         validate_state(record["before_state"])
         desired = validate_state(record["desired_state"])
@@ -80,7 +83,8 @@ class Installer:
         safe_regular(self.store.journal_path)
         if not self.store.journal_path.exists():
             current = self.store.state()
-            self.store.cleanup(current["transaction_id"] if current else None)
+            self.store.cleanup(self._retained(current))
+            self._migrate(current)
             return
         pointer = read_json(self.store.journal_path.read_bytes())
         if set(pointer) != {"transaction_id"}:
@@ -91,30 +95,53 @@ class Installer:
         # Completed installation cleanup must not depend on the old backup's health.
         if current and current["transaction_id"] == transaction:
             self.store.journal_path.unlink()
-            self.store.cleanup(transaction)
+            self.store.cleanup(self._retained(current))
+            self._migrate(current)
             self.emit("Finished cleanup for the completed update.")
             return
         record = self._read_record(transaction)
         self.emit("Recovering the interrupted update…")
         self._rollback(record)
+        self._migrate(self.store.state())
         self.emit("Your previous patch has been restored.")
+
+    @staticmethod
+    def _retained(state):
+        return {state.get(key) for key in ("transaction_id", "restore_id", "repair_id")} - {None} if state else set()
+
+    def _migrate(self, state):
+        if state and state["schema_version"] == 1:
+            backup = self.store.meta / "installed-1.0-backup.json"
+            if not backup.exists():
+                atomic_copy(self.store.state_path, backup)
+            self.store.save_state(dict(state, schema_version=2, restore_id=state["transaction_id"],
+                                       repair_id=None, undo_restore=False, suppressed_patch=None))
 
     def recover(self):
         with self.store.lock():
             self._recover()
 
-    def _status(self, available: Manifest, *, adopt=False):
+    def _status(self, available: Manifest | None, *, adopt=False):
         state = self.store.state()
+        if adopt and state and available and state["suppressed_patch"] and state["suppressed_patch"] != available.patch_id:
+            state = dict(state, suppressed_patch=None)
+            self.store.save_state(state)
         installed = Manifest.parse(state["manifest"]) if state and state["manifest"] else None
         repair_files = tuple(name for name in FILES if not self.store.game_file(name).exists())
-        can_restore = bool(state and state["transaction_id"])
+        can_restore = bool(state and state["restore_id"])
+        extra = (bool(state and state["undo_restore"]),
+                 bool(state and available and state["suppressed_patch"] == available.patch_id),
+                 state["repair_id"] if state else None)
+        if available is None:
+            return Status("offline", installed, (), repair_files, can_restore, *extra)
         if installed is None:
             matching = not repair_files and all(sha256_file(self.store.game_file(f.name)) == f.sha256 for f in available.files)
             if matching and adopt:
-                transaction = state["transaction_id"] if state else None
-                self.store.save_state({"schema_version": 1, "manifest": available.to_dict(), "transaction_id": transaction})
-                return Status("current", available, (), (), can_restore)
-            return Status("adopt" if matching else "install", None, FILES, repair_files, can_restore)
+                adopted = dict(state) if state else self._state(None, None)
+                adopted["manifest"] = available.to_dict()
+                self.store.save_state(adopted)
+                return Status("current", available, (), (), can_restore, *extra)
+            return Status("adopt" if matching else "install", None, FILES, repair_files, can_restore, *extra)
         old_hashes = {file.name: file.sha256 for file in installed.files}
         if "d3d9.dll" not in repair_files and sha256_file(self.store.game_file("d3d9.dll")) != old_hashes["d3d9.dll"]:
             repair_files = tuple(name for name in FILES if name == "d3d9.dll" or name in repair_files)
@@ -125,12 +152,18 @@ class Installer:
             kind = "repair"
         else:
             kind = "current"
-        return Status(kind, installed, changed, repair_files, can_restore)
+        return Status(kind, installed, changed, repair_files, can_restore, *extra)
 
-    def check(self, available: Manifest):
+    def check(self, available: Manifest | None = None):
         with self.store.lock():
             self._recover()
             return self._status(available, adopt=True)
+
+    @staticmethod
+    def _state(manifest, transaction):
+        return {"schema_version": 2, "manifest": manifest, "transaction_id": transaction,
+                "restore_id": transaction, "repair_id": None,
+                "undo_restore": False, "suppressed_patch": None}
 
     def _prepare(self, names, desired_manifest):
         transaction = uuid.uuid4().hex
@@ -138,9 +171,8 @@ class Installer:
         folder.mkdir()
         try:
             (folder / "before").mkdir()
-            record = {"schema_version": 1, "id": transaction, "before_state": self.store.state(),
-                      "desired_state": {"schema_version": 1, "manifest": desired_manifest,
-                                        "transaction_id": transaction}, "entries": []}
+            record = {"schema_version": 2, "id": transaction, "before_state": self.store.state(),
+                      "desired_state": self._state(desired_manifest, transaction), "entries": []}
             for name in names:
                 source = self.store.game_file(name)
                 existed = source.exists()
@@ -189,7 +221,7 @@ class Installer:
         # The new state is now committed; a cleanup failure is recovered next launch.
         try:
             self.store.journal_path.unlink()
-            self.store.cleanup(record["id"])
+            self.store.cleanup(self._retained(record["desired_state"]))
         except OSError:
             pass
         self.emit("Patch installed successfully.", 1.0)
@@ -226,7 +258,18 @@ class Installer:
                 self.game_guard(self.store.root)
                 self.emit("Backing up affected files…", 0.75)
                 folder, record = self._prepare(names, manifest.to_dict())
+                before = record["before_state"]
+                if before:
+                    record["desired_state"]["repair_id"] = before["repair_id"]
+                if repair:
+                    record["desired_state"]["repair_id"] = record["id"]
+                if status.installed and status.installed.patch_id == manifest.patch_id:
+                    record["desired_state"].update(restore_id=before["restore_id"], repair_id=record["id"],
+                                                   undo_restore=before["undo_restore"],
+                                                   suppressed_patch=before["suppressed_patch"])
                 self._commit(folder, record, [(name, staging / "stage" / name) for name in names])
+                if record["desired_state"]["repair_id"] == record["id"]:
+                    self.emit(f"Pre-repair backup retained at {folder / 'before'}")
             finally:
                 # On recovery failure, the separate backup transaction remains intact.
                 try:
@@ -239,14 +282,18 @@ class Installer:
             self._recover()
             self.game_guard(self.store.root)
             current = self.store.state()
-            if not current or not current["transaction_id"]:
+            if not current or not current["restore_id"]:
                 raise UpdaterError("There is no previous update to restore for this game folder.")
-            previous = self._read_record(current["transaction_id"])
+            previous = self._read_record(current["restore_id"])
             previous_folder = self.store.tx_path(previous["id"]) / "before"
             old_state = previous["before_state"]
             old_manifest = old_state["manifest"] if old_state else None
             names = [entry["name"] for entry in previous["entries"]]
             folder, record = self._prepare(names, old_manifest)
+            record["desired_state"].update(repair_id=current["repair_id"],
+                                           undo_restore=not current["undo_restore"],
+                                           suppressed_patch=(None if current["undo_restore"] else
+                                                             current["manifest"]["patch_id"] if current["manifest"] else None))
             actions = [(entry["name"], previous_folder / entry["name"] if entry["existed"] else None)
                        for entry in previous["entries"]]
             self._commit(folder, record, actions)

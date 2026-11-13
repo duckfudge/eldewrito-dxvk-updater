@@ -12,6 +12,7 @@ from pathlib import Path
 REPOSITORY = "duckfudge/eldewrito-dxvk"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPOSITORY}"
 MANIFEST_URL = f"{RAW_BASE}/updates/manifest.json"
+PROGRAM_URL = f"{RAW_BASE}/updates/updater.json"
 RELEASES_URL = f"https://github.com/{REPOSITORY}/releases"
 FILES = ("d3d9.dll", "dxvk.conf", "eldorado.dxvk-cache")
 MAX_SIZES = {"d3d9.dll": 64 * 1024**2, "dxvk.conf": 256 * 1024,
@@ -24,7 +25,13 @@ class UpdaterError(Exception):
     """An actionable error suitable for presentation to a player."""
 
 
-def read_json(data: bytes | str) -> dict:
+def version_tuple(value):
+    if not isinstance(value, str) or not re.fullmatch(r"(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})", value):
+        raise UpdaterError("Invalid updater version.")
+    return tuple(map(int, value.split(".")))
+
+
+def read_json(data: bytes | str, *, max_size=64 * 1024) -> dict:
     def unique(pairs):
         result = {}
         for key, value in pairs:
@@ -33,7 +40,7 @@ def read_json(data: bytes | str) -> dict:
             result[key] = value
         return result
     try:
-        if len(data) > 64 * 1024:
+        if len(data) > max_size:
             raise ValueError("JSON exceeds size limit")
         result = json.loads(data, object_pairs_hook=unique)
         if not isinstance(result, dict):
@@ -70,14 +77,21 @@ class Manifest:
     published_at: str
     summary: str
     files: tuple[PatchFile, ...]
+    title: str = "Curated DXVK patch"
+    minimum_updater: str = "1.1.0"
+    schema_version: int = 2
 
     @classmethod
     def parse(cls, data: bytes | str | dict) -> "Manifest":
         obj = read_json(data) if not isinstance(data, dict) else data
         try:
-            if type(obj.get("schema_version")) is not int or obj["schema_version"] != 1:
+            schema = obj.get("schema_version")
+            if type(schema) is not int or schema not in (1, 2):
                 raise UpdaterError("This feed needs a newer updater. Download it from GitHub Releases.")
-            if set(obj) != {"schema_version", "source_commit", "patch_id", "published_at", "summary", "files"}:
+            fields = {"schema_version", "source_commit", "patch_id", "published_at", "summary", "files"}
+            if schema == 2:
+                fields |= {"title", "minimum_updater"}
+            if set(obj) != fields:
                 raise ValueError("Unexpected manifest fields")
             commit, revision = obj["source_commit"], obj["patch_id"]
             if not isinstance(commit, str) or not HEX40.fullmatch(commit):
@@ -90,6 +104,11 @@ class Manifest:
             summary = obj["summary"]
             if not isinstance(summary, str) or len(summary) > 2000 or any(ord(c) < 32 and c not in "\n\t" for c in summary):
                 raise ValueError("Invalid summary")
+            title = obj.get("title", "Curated DXVK patch")
+            if not isinstance(title, str) or not title.strip() or len(title) > 100 or any(ord(c) < 32 for c in title):
+                raise ValueError("Invalid patch title")
+            minimum = obj.get("minimum_updater", "1.0.0")
+            version_tuple(minimum)
             rows = obj["files"]
             if not isinstance(rows, list) or len(rows) != len(FILES):
                 raise ValueError("Expected exactly three files")
@@ -110,14 +129,17 @@ class Manifest:
             files = tuple(sorted(parsed, key=lambda f: FILES.index(f.name)))
             if patch_id(files) != revision:
                 raise ValueError("Patch ID does not match contents")
-            return cls(commit, revision, stamp, summary, files)
+            return cls(commit, revision, stamp, summary, files, title, minimum, schema)
         except (KeyError, ValueError, TypeError, OverflowError) as exc:
             raise UpdaterError(f"Invalid update metadata: {exc}.") from exc
 
     def to_dict(self):
-        return {"schema_version": 1, "source_commit": self.source_commit,
+        result = {"schema_version": self.schema_version, "source_commit": self.source_commit,
                 "patch_id": self.patch_id, "published_at": self.published_at,
                 "summary": self.summary, "files": [f.to_dict() for f in self.files]}
+        if self.schema_version == 2:
+            result.update(title=self.title, minimum_updater=self.minimum_updater)
+        return result
 
     def download_url(self, file: PatchFile) -> str:
         if file not in self.files:
@@ -191,7 +213,7 @@ def validate_cache(data: bytes):
         raise UpdaterError("The shader cache is truncated, damaged, or uses an unsupported format (supported: 8–15, 17–18).") from None
 
 
-def make_manifest(commit: str, payloads: dict[str, bytes], summary: str) -> Manifest:
+def make_manifest(commit: str, payloads: dict[str, bytes], summary: str, title="Curated DXVK patch") -> Manifest:
     if set(payloads) != set(FILES):
         raise UpdaterError("The patch must contain all three DXVK files.")
     files = []
@@ -199,7 +221,8 @@ def make_manifest(commit: str, payloads: dict[str, bytes], summary: str) -> Mani
         data = payloads[name]
         validate_payload(name, data)
         files.append(PatchFile(name, len(data), hashlib.sha256(data).hexdigest()))
-    return Manifest.parse({"schema_version": 1, "source_commit": commit,
+    return Manifest.parse({"schema_version": 2, "source_commit": commit,
                            "patch_id": patch_id(tuple(files)),
                            "published_at": datetime.now(timezone.utc).isoformat(),
-                           "summary": summary[:2000], "files": [f.to_dict() for f in files]})
+                           "title": title, "minimum_updater": "1.1.0",
+                           "summary": summary, "files": [f.to_dict() for f in files]})

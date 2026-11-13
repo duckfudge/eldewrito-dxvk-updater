@@ -16,9 +16,11 @@ import customtkinter as ctk
 
 from . import __version__
 from .engine import Installer
+from .game import game_support
 from .model import FILES, RELEASES_URL, UpdaterError
 from .network import FeedClient
 from .settings import remember_game, settings_directory, suggested_game
+from .program_update import fetch_program, prepare_update, handoff
 
 BG = "#0B1018"
 PANEL = "#111B28"
@@ -47,6 +49,12 @@ class App(ctk.CTk):
         self.busy = False
         self.manifest = None
         self.status = None
+        self.local_status = None
+        self.program = None
+        self.program_deferred = False
+        self.check_error = ""
+        self.closing = False
+        self.game_info = ("Unrecognized ElDewrito build", False)
         self.game = game or suggested_game()
         self.details_visible = False
         self.operation = None
@@ -171,12 +179,14 @@ class App(ctk.CTk):
         self.summary.configure(wraplength=max(180, width - 40))
         self.progress_text.configure(wraplength=max(180, width))
         self.folder_label.configure(wraplength=max(100, width - 220))
+        self.installed_value.configure(wraplength=max(100, width / 2 - 52))
+        self.available_value.configure(wraplength=max(100, width / 2 - 52))
 
     def _version_card(self, parent, col, title, value, detail):
         frame = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=10)
         frame.grid(row=0, column=col, sticky="ew", padx=(0, 8) if col == 0 else (8, 0))
         self.label(frame, title, 10, MUTED, "bold").pack(anchor="w", padx=18, pady=(14, 4))
-        label = self.label(frame, value, 22, TEXT if col == 0 else CYAN, "bold")
+        label = self.label(frame, value, 18, TEXT if col == 0 else CYAN, "bold", wraplength=240, justify="left")
         label.pack(anchor="w", padx=18)
         sublabel = self.label(frame, detail, 11, MUTED)
         sublabel.pack(anchor="w", padx=18, pady=(4, 14))
@@ -190,11 +200,16 @@ class App(ctk.CTk):
         for button in (self.check_button, self.folder_button):
             button.configure(state="normal" if available else "disabled")
         ready = available and self.game is not None and self.manifest is not None
-        self.update_button.configure(state="normal" if ready and self.status and self.status.kind != "current" else "disabled")
-        self.repair_button.configure(state="normal" if ready else "disabled")
-        # Restoration is available offline whenever a game is selected; the engine validates it.
-        self.restore_button.configure(state="normal" if available and self.game else "disabled")
+        program = self._program_offered()
+        self.update_button.configure(state="normal" if available and program or ready and self.status and self.status.kind != "current" else "disabled")
+        self.repair_button.configure(state="normal" if ready and not program else "disabled")
+        restore = self.status or self.local_status
+        self.restore_button.configure(state="normal" if available and self.game and restore and restore.can_restore else "disabled",
+                                      text="Undo restore" if restore and restore.undo_restore else "Restore previous update")
         self.later_button.configure(state="normal" if available else "disabled")
+
+    def _program_offered(self):
+        return bool(self.program and self.program.newer() and not self.program_deferred)
 
     def emit(self, text, fraction=None):
         self.events.put(("progress", (text, fraction)))
@@ -225,14 +240,32 @@ class App(ctk.CTk):
                     if fraction is not None:
                         self.progress.set(fraction)
                     self._log(message)
+                elif kind == "local_status":
+                    self.local_status = value
+                    self.status = value
+                    if value.repair_id:
+                        self._log(f"Pre-repair backup: {self.game / '.dxvk-updater' / 'transactions' / value.repair_id / 'before'}")
+                elif kind == "game_info":
+                    self.game_info = value
+                    self._log(value[0] + ("" if value[1] else " — unsupported; approval required before changes"))
                 elif kind == "done":
                     self.busy = False
                     operation, result = value
                     if operation == "check":
-                        self.manifest, self.status = result
+                        self.manifest, self.status, self.program, self.check_error = result
+                        self.local_status = self.status
                         self._render()
+                    elif operation == "program":
+                        try:
+                            handoff(result)
+                        except Exception as exc:
+                            self.events.put(("error", str(exc)))
+                            continue
+                        self.destroy()
+                        return
                     else:
                         self.status = result
+                        self.local_status = result
                         if self.status:
                             self._render()
                         else:
@@ -242,9 +275,12 @@ class App(ctk.CTk):
                         if operation == "restore":
                             self.badge.configure(text="RESTORE COMPLETE", text_color=GREEN)
                             self.headline.configure(text="Your previous files are back")
-                            self.summary.configure(text="The previous file state has been restored. Updates remain optional.")
+                            self.summary.configure(text="The selected backup has been restored. The reverted patch stays optional; Undo restore can reverse this action.")
                         self.progress.set(1)
                     self._buttons()
+                    if self.closing:
+                        self.destroy()
+                        return
                 elif kind == "error":
                     self.busy = False
                     if self.operation == "check":
@@ -252,7 +288,7 @@ class App(ctk.CTk):
                         self.available_value.configure(text="Unavailable")
                         self.available_date.configure(text="Try checking again")
                     # Clear stale update choices after an error; restoration remains available.
-                    self.status = None
+                    self.status = self.local_status
                     self.badge.configure(text="ACTION NEEDED", text_color=AMBER)
                     self.headline.configure(text="We couldn’t finish that step")
                     self.summary.configure(text=value[:600])
@@ -260,6 +296,9 @@ class App(ctk.CTk):
                     self.progress_text.configure(text="Check the message above, then try again.")
                     self._log(value)
                     self._buttons()
+                    if self.closing:
+                        self.destroy()
+                        return
         except queue.Empty:
             pass
         self.after(60, self._poll)
@@ -275,17 +314,30 @@ class App(ctk.CTk):
 
     def _render(self):
         manifest, status = self.manifest, self.status
-        self.available_value.configure(text=manifest.patch_id[:10])
-        self.available_date.configure(text=f"Published {manifest.published_at[:10]}")
+        self.available_value.configure(text=manifest.title if manifest else "Unavailable")
+        self.available_date.configure(text=f"{manifest.patch_id[:10]} · {manifest.published_at[:10]}" if manifest else "Check again to reconnect")
         if status and status.installed:
-            self.installed_value.configure(text=status.installed.patch_id[:10])
-            self.installed_date.configure(text=f"Patch published · {status.installed.published_at[:10]}")
+            self.installed_value.configure(text=status.installed.title)
+            self.installed_date.configure(text=f"{status.installed.patch_id[:10]} · {status.installed.published_at[:10]}")
         else:
             self.installed_value.configure(text="Not managed yet" if self.game else "No folder selected")
             self.installed_date.configure(text="Ready for first installation" if self.game else "Select your ElDewrito folder")
-        if not status:
+        if self._program_offered():
+            self.badge.configure(text="PROGRAM UPDATE AVAILABLE", text_color=CYAN)
+            self.headline.configure(text=f"Updater {self.program.version} is ready")
+            self.summary.configure(text=self.program.summary + "\nUpdate and restart the program first. Patch installation asks separately. Later continues with compatible patches.")
+            self.file_list.configure(text=f"{human_size(self.program.size)} download · Game files are preserved")
+            self.update_button.configure(text="Update program")
+            return
+        if not manifest:
+            badge, headline, summary = "OFFLINE / ACTION NEEDED", "Could not check the patch", self.check_error or "Check again when GitHub is available. Existing backups can be restored offline."
+            names = ()
+        elif not status:
             badge, headline, summary = "READY TO CONNECT", "Choose your game folder", "Select the folder containing eldorado.exe to check your installed patch."
             names = ()
+        elif status.suppressed and status.kind != "current":
+            badge, headline, summary = "PREVIOUS PATCH KEPT", "This patch was restored away", "You chose to restore your previous patch. This revision will not prompt again. You can still install it explicitly, or wait for different published patch contents."
+            names = status.changed or FILES
         elif status.kind == "current":
             badge, headline, summary = "UP TO DATE", "You’re ready to play", "You have the latest published patch. Your local shader cache can continue growing normally."
             names = ()
@@ -295,15 +347,15 @@ class App(ctk.CTk):
         else:
             badge = "UPDATE AVAILABLE" if status.installed else "PATCH AVAILABLE"
             headline = "A new patch is ready" if status.installed else "Bring DXVK to ElDewrito"
-            summary = (manifest.summary[:280] or "A new curated DXVK patch is available.") + "\nAffected local files will be backed up and replaced."
+            summary = (manifest.summary or "A new curated DXVK patch is available.") + "\nAffected local files will be backed up and replaced."
             names = status.changed if status.installed else FILES
             names = tuple(dict.fromkeys((*names, *status.repair_files)))
         self.badge.configure(text=badge, text_color=GREEN if status and status.kind == "current" else CYAN)
         self.headline.configure(text=headline)
         self.summary.configure(text=summary)
-        files = [f for f in manifest.files if f.name in names]
+        files = [f for f in manifest.files if f.name in names] if manifest else []
         self.file_list.configure(text="  ·  ".join(f.name for f in files) + (f"\n{human_size(sum(f.size for f in files))} download" if files else ""))
-        self.update_button.configure(text="Install patch" if status and not status.installed else "Repair patch files" if status and status.kind == "repair" else "Update now")
+        self.update_button.configure(text="Install anyway" if status and status.suppressed else "Install patch" if status and not status.installed else "Repair patch files" if status and status.kind == "repair" else "Update now")
         self.progress_text.configure(text="Checked just now · GitHub")
 
     def choose_folder(self):
@@ -322,6 +374,7 @@ class App(ctk.CTk):
             self._log(f"Could not remember folder: {exc}")
         self.folder_label.configure(text=self._folder_text())
         self.status = None
+        self.local_status = None
         self.installed_value.configure(text="Not checked")
         self.installed_date.configure(text="Checking selected folder")
         self.check()
@@ -332,6 +385,7 @@ class App(ctk.CTk):
         game = self.game
         self.manifest = None
         self.status = None
+        self.local_status = None
         self.available_value.configure(text="Checking…")
         self.available_date.configure(text="Connecting to GitHub")
         self.progress.set(0)
@@ -340,15 +394,30 @@ class App(ctk.CTk):
             try:
                 engine = Installer(game, client, self.emit) if game else None
                 if engine:
-                    engine.recover()  # Recovery works even when GitHub is offline.
+                    self.events.put(("local_status", engine.check()))
+                    self.events.put(("game_info", game_support(game)))
+                program, error = None, ""
+                try:
+                    program = fetch_program(client)
+                except UpdaterError as exc:
+                    self.emit(f"Program update check unavailable: {exc}")
                 self.emit("Checking the latest published patch…")
-                manifest = client.fetch_manifest()
-                return manifest, engine.check(manifest) if engine else None
+                try:
+                    manifest = client.fetch_manifest()
+                    status = engine.check(manifest) if engine else None
+                except UpdaterError as exc:
+                    manifest, status, error = None, engine.check() if engine else None, str(exc)
+                return manifest, status, program, error
             finally:
                 client.close()
         self._run("check", work)
 
     def update(self):
+        if self._program_offered():
+            if messagebox.askyesno("Update the updater program?", f"Download updater {self.program.version}, replace this program's files, and restart? Game files will be preserved. Windows may ask for administrator approval if this program folder requires it.", parent=self):
+                release = self.program
+                self._run("program", lambda: prepare_update(release, self.emit, self.cancel.is_set))
+            return
         self._install(repair=False)
 
     def repair(self):
@@ -357,6 +426,8 @@ class App(ctk.CTk):
 
     def _install(self, repair):
         if not self.game or not self.manifest:
+            return
+        if not self._approve_game():
             return
         game, manifest = self.game, self.manifest
         def work():
@@ -372,19 +443,29 @@ class App(ctk.CTk):
     def restore(self):
         if not self.game:
             return
-        if not messagebox.askyesno("Restore the previous update?", "Restore the files saved before your last successful patch change? Your current affected files will become the new restore point.", parent=self):
+        undo = bool(self.status and self.status.undo_restore)
+        if not messagebox.askyesno("Undo restore?" if undo else "Restore the previous patch?", "Restore the saved file state? Your current affected files will be backed up so this action can be undone. Repairs retain a separate backup.", parent=self):
             return
         game, manifest = self.game, self.manifest
         def work():
             engine = Installer(game, None, self.emit)
             engine.restore()
-            return engine.check(manifest) if manifest else None
+            return engine.check(manifest)
         self._run("restore", work)
 
     def later(self):
+        if self._program_offered():
+            self.program_deferred = True
+            self._render()
+            self._buttons()
+            return
         self.badge.configure(text="UPDATE POSTPONED", text_color=MUTED)
         self.headline.configure(text="Play on your own schedule")
         self.summary.configure(text="You can update here when you’re ready.")
+
+    def _approve_game(self):
+        description, supported = self.game_info
+        return supported or messagebox.askyesno("Unsupported game build", description + "\n\nThis patch is tested for stable ElDewrito 0.7 releases. Continue with this unsupported build?", parent=self)
 
     def toggle_details(self):
         self.details_visible = not self.details_visible
@@ -396,14 +477,16 @@ class App(ctk.CTk):
 
     def _close(self):
         if self.busy:
+            self.closing = True
             self.cancel.set()
-            self.progress_text.configure(text="Waiting for the current operation to finish safely. You can close this window when it completes.")
+            self.progress_text.configure(text="Cancelling downloads and waiting for the current operation to finish safely, then closing…")
             return
         self.destroy()
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--game-dir", type=Path)
+    parser.add_argument("--program-health")
     args = parser.parse_args()
     directory = settings_directory()
     try:
@@ -414,7 +497,17 @@ def main():
         logging.basicConfig(level=logging.INFO)
     ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("blue")
-    App(game=args.game_dir).mainloop()
+    app = App(game=args.game_dir)
+    if args.program_health:
+        def healthy():
+            try:
+                from .windows import health_event
+                health_event(args.program_health, signal=True)
+            except Exception:
+                app.destroy()
+                raise
+        app.after(100, healthy)
+    app.mainloop()
 
 
 if __name__ == "__main__":
