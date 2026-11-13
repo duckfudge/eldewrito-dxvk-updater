@@ -78,6 +78,7 @@ def test_config_only_update_preserves_local_cache_and_dll(game, client, manifest
     engine.restore()
     assert snapshot(game) == before
     assert engine.check(updated).kind == "update"
+    assert engine.check(updated).suppressed
 
 
 def test_remote_cache_update_replaces_local_cache(game, client, manifest, payloads):
@@ -106,8 +107,10 @@ def test_missing_file_and_explicit_repair(game, client, manifest, payloads):
     engine.install(manifest, repair=True)
     assert client.calls == list(FILES)
     assert snapshot(game) == payloads
+    repair_id = engine.store.state()["repair_id"]
+    assert (engine.store.tx_path(repair_id) / "before" / "dxvk.conf").read_bytes() == b"local config"
     engine.restore()
-    assert (game / "dxvk.conf").read_bytes() == b"local config"
+    assert all(value is None for value in snapshot(game).values())
 
 
 def test_failed_download_never_changes_patch(game, client, manifest):
@@ -338,8 +341,10 @@ def test_damaged_dll_repairs_only_dll_and_preserves_local_edits(game, client, ma
     assert (game / "dxvk.conf").read_bytes() == before["dxvk.conf"]
     assert (game / "eldorado.dxvk-cache").read_bytes() == before["eldorado.dxvk-cache"]
     assert engine.check(manifest).kind == "current"
+    repair_id = engine.store.state()["repair_id"]
+    assert (engine.store.tx_path(repair_id) / "before" / "d3d9.dll").read_bytes() == damage
     engine.restore()
-    assert snapshot(game) == before
+    assert all(value is None for value in snapshot(game).values())
 
 
 def test_disk_full_rollback_skips_already_restored_cache(game, client, payloads, monkeypatch):
@@ -414,3 +419,139 @@ def test_failed_recovery_keeps_backups_until_game_closes(game, client, manifest,
     assert {p.name for p in engine.store.transactions.iterdir()} == transactions
     engine.recover()
     assert not engine.store.journal_path.exists()
+
+
+def test_repair_preserves_previous_revision_and_separate_local_backup(game, client, manifest, payloads):
+    engine = installer(game, client)
+    engine.install(manifest)
+    payloads["dxvk.conf"] = b"dxvk.hud = fps\n"
+    second = make_manifest("b" * 40, payloads, "second")
+    engine.install(second)
+    checkpoint = engine.store.state()["restore_id"]
+    (game / "dxvk.conf").write_bytes(b"my local changes")
+    engine.install(second, repair=True)
+    state = engine.store.state()
+    assert state["restore_id"] == checkpoint != state["repair_id"]
+    backup = engine.store.tx_path(state["repair_id"]) / "before" / "dxvk.conf"
+    assert backup.read_bytes() == b"my local changes"
+    engine.recover()
+    engine.restore()
+    status = engine.check(second)
+    assert status.installed.patch_id == manifest.patch_id
+    assert status.undo_restore and status.suppressed
+    assert backup.read_bytes() == b"my local changes"
+    engine.restore()
+    status = engine.check(second)
+    assert status.installed.patch_id == second.patch_id
+    assert not status.undo_restore and not status.suppressed
+
+
+def test_suppression_clears_when_different_patch_is_offered(game, client, manifest, payloads):
+    engine = installer(game, client)
+    engine.install(manifest)
+    engine.restore()
+    assert engine.check(manifest).suppressed
+    payloads["dxvk.conf"] += b"dxvk.numCompilerThreads = 1\n"
+    third = make_manifest("c" * 40, payloads, "third")
+    assert not engine.check(third).suppressed
+    assert not engine.check(manifest).suppressed
+
+
+def test_legacy_state_migration_preserves_restore_and_blocks_old_schema(game, client, manifest):
+    import json
+    engine = installer(game, client)
+    engine.install(manifest)
+    current = engine.store.state()
+    legacy_manifest = manifest.to_dict()
+    legacy_manifest.update(schema_version=1)
+    for key in ("title", "minimum_updater"):
+        legacy_manifest.pop(key)
+    legacy = {"schema_version": 1, "manifest": legacy_manifest, "transaction_id": current["transaction_id"]}
+    engine.store.state_path.write_text(json.dumps(legacy))
+    engine.recover()
+    state = engine.store.state()
+    assert state["schema_version"] == 2
+    assert state["restore_id"] == legacy["transaction_id"]
+    assert json.loads((engine.store.meta / "installed-1.0-backup.json").read_text()) == legacy
+    engine.restore()
+    assert all(value is None for value in snapshot(game).values())
+
+
+def test_failed_repair_preserves_both_previous_checkpoints(game, client, manifest, monkeypatch):
+    engine = installer(game, client)
+    engine.install(manifest)
+    engine.install(manifest, repair=True)
+    old_state = engine.store.state()
+    real_copy = module.atomic_copy
+    failed = False
+    def fail(source, target):
+        nonlocal failed
+        if target == game / "dxvk.conf" and not failed:
+            failed = True
+            raise PermissionError("locked")
+        real_copy(source, target)
+    monkeypatch.setattr(module, "atomic_copy", fail)
+    with pytest.raises(UpdaterError, match="previous files were restored"):
+        engine.install(manifest, repair=True)
+    assert engine.store.state() == old_state
+    for transaction in engine._retained(old_state):
+        assert engine.store.tx_path(transaction).exists()
+
+
+def test_interrupted_legacy_journal_recovers_before_state_migration(game, client, manifest, monkeypatch):
+    import json
+    engine = installer(game, client)
+    (game / "d3d9.dll").write_bytes(b"original wrapper")
+    before = snapshot(game)
+    original_copy = module.atomic_copy
+    def crash(source, target):
+        if target == game / "dxvk.conf":
+            raise KeyboardInterrupt()
+        original_copy(source, target)
+    monkeypatch.setattr(module, "atomic_copy", crash)
+    with pytest.raises(KeyboardInterrupt):
+        engine.install(manifest)
+    monkeypatch.setattr(module, "atomic_copy", original_copy)
+    pointer = json.loads(engine.store.journal_path.read_text())
+    record_path = engine.store.tx_path(pointer["transaction_id"]) / "record.json"
+    record = json.loads(record_path.read_text())
+    record["schema_version"] = 1
+    desired = record["desired_state"]
+    for key in ("restore_id", "repair_id", "undo_restore", "suppressed_patch"):
+        desired.pop(key)
+    desired["schema_version"] = 1
+    desired["manifest"]["schema_version"] = 1
+    desired["manifest"].pop("title")
+    desired["manifest"].pop("minimum_updater")
+    record_path.write_text(json.dumps(record))
+    engine.recover()
+    assert snapshot(game) == before
+    assert not engine.store.journal_path.exists()
+
+
+def test_committed_repair_crash_keeps_revision_and_repair_points(game, client, manifest, monkeypatch):
+    engine = installer(game, client)
+    engine.install(manifest)
+    original_id = engine.store.state()["restore_id"]
+    original_save = Store.save_state
+    def crash(store, state):
+        original_save(store, state)
+        raise KeyboardInterrupt()
+    monkeypatch.setattr(Store, "save_state", crash)
+    with pytest.raises(KeyboardInterrupt):
+        engine.install(manifest, repair=True)
+    monkeypatch.setattr(Store, "save_state", original_save)
+    engine.recover()
+    state = engine.store.state()
+    assert state["restore_id"] == original_id
+    assert state["repair_id"] != original_id
+    assert {p.name for p in engine.store.transactions.iterdir()} == engine._retained(state)
+
+
+def test_first_explicit_repair_exposes_its_backup(game, client, manifest):
+    (game / "dxvk.conf").write_bytes(b"personal manual installation")
+    engine = installer(game, client)
+    engine.install(manifest, repair=True)
+    status = engine.check(manifest)
+    assert status.repair_id == engine.store.state()["restore_id"]
+    assert (engine.store.tx_path(status.repair_id) / "before" / "dxvk.conf").read_bytes() == b"personal manual installation"

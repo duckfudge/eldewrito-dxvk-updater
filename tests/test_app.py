@@ -20,13 +20,16 @@ class Widget:
 
 def ui(manifest):
     app = SimpleNamespace(events=queue.Queue(), busy=True,
-                          game="game", manifest=manifest, status=None, operation="check")
+                          game="game", manifest=manifest, status=None, local_status=None, operation="check",
+                          program=None, program_deferred=False, check_error="", closing=False)
     for name in ("check_button", "folder_button", "update_button", "repair_button",
                  "restore_button", "later_button", "available_value", "available_date",
                  "installed_value", "installed_date", "badge", "headline", "summary",
                  "file_list", "progress", "progress_text"):
         setattr(app, name, Widget())
     app._buttons = lambda: App._buttons(app)
+    app._render = lambda: App._render(app)
+    app._program_offered = lambda: App._program_offered(app)
     app._log = lambda text: None
     app._poll = lambda: None
     app.after = lambda *args: None
@@ -39,7 +42,7 @@ def test_failed_check_disables_repair_using_stale_manifest(manifest):
     App._poll(app)
     assert app.manifest is None
     assert app.repair_button.options["state"] == "disabled"
-    assert app.restore_button.options["state"] == "normal"
+    assert app.restore_button.options["state"] == "disabled"
 
 
 def test_offline_restore_clears_stale_installed_details():
@@ -82,8 +85,49 @@ def test_window_and_minimum_fit_screen_at_high_dpi(scale):
 
 def test_text_wraps_to_narrower_body():
     app = SimpleNamespace(**{name: Widget() for name in
-                          ("headline", "summary", "progress_text", "folder_label")})
+                          ("headline", "summary", "progress_text", "folder_label", "installed_value", "available_value")})
     App._wrap_text(app, 580)
     assert app.headline.options["wraplength"] == 540
     assert app.summary.options["wraplength"] == 540
     assert app.folder_label.options["wraplength"] == 360
+
+
+def test_offline_known_restore_point_remains_available(manifest):
+    from dxvk_updater.engine import Status
+    app = ui(None)
+    app.busy = False
+    app.local_status = Status("offline", manifest, (), (), True, True)
+    App._buttons(app)
+    assert app.restore_button.options["state"] == "normal"
+    assert app.restore_button.options["text"] == "Undo restore"
+    assert app.repair_button.options["state"] == "disabled"
+
+
+def test_program_offer_precedes_patch_and_later_allows_compatible_patch(manifest):
+    from dxvk_updater.engine import Status
+    from dxvk_updater.program_update import ProgramRelease
+    app = ui(manifest)
+    app.busy = False
+    app.status = Status("install", None, (), (), False)
+    app.program = ProgramRelease("1.2.0", "a" * 40, 100, "b" * 64, "2026-11-13T00:00:00+00:00", "Program notes")
+    App._render(app)
+    App._buttons(app)
+    assert app.update_button.options["text"] == "Update program"
+    assert app.repair_button.options["state"] == "disabled"
+    App.later(app)
+    assert app.program_deferred
+    assert app.update_button.options["text"] == "Install patch"
+    assert app.repair_button.options["state"] == "normal"
+
+
+def test_close_during_operation_exits_after_safe_completion():
+    import threading
+    app = ui(None)
+    app.cancel, app.progress_text = threading.Event(), Widget()
+    destroyed = []
+    app.destroy = lambda: destroyed.append(True)
+    App._close(app)
+    assert app.cancel.is_set() and app.closing
+    app.events.put(("done", ("restore", None)))
+    App._poll(app)
+    assert destroyed == [True]

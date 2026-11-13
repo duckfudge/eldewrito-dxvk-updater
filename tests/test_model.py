@@ -15,7 +15,7 @@ def test_roundtrip_and_commit_pinning(manifest):
 
 
 @pytest.mark.parametrize("mutation", [
-    lambda m: m.update(schema_version=2),
+    lambda m: m.update(schema_version=3),
     lambda m: m.update(schema_version=True),
     lambda m: m.update(source_commit="main"),
     lambda m: m.update(source_commit="../main"),

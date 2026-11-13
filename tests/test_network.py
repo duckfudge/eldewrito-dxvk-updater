@@ -56,6 +56,13 @@ def test_oversized_manifest():
         FeedClient(Session(Response(b"x" * 70000))).fetch_manifest()
 
 
+def test_new_minimum_program_version_blocks_patch_install(manifest):
+    obj = manifest.to_dict()
+    obj["minimum_updater"] = "9.0.0"
+    with pytest.raises(UpdaterError, match="Update the program first"):
+        FeedClient(Session(Response(json.dumps(obj).encode()))).fetch_manifest()
+
+
 def test_download_verifies_and_uses_commit(manifest, payloads, tmp_path):
     response = Response(payloads["d3d9.dll"])
     session = Session(response)
