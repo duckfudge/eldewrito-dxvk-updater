@@ -9,12 +9,14 @@ import shutil
 import subprocess
 import struct
 import sys
+import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from dxvk_updater import __version__
+from dxvk_updater.bundle import INVENTORY, extract_bundle, parse_inventory
 
 
 def build_environment():
@@ -63,10 +65,23 @@ def audit_archive(path):
                     tail = block[-256:]
         if archive.testzip():
             raise ValueError("The distribution ZIP is corrupt")
+    with tempfile.TemporaryDirectory(prefix="dxvk-bundle-audit-") as temporary:
+        extract_bundle(path, Path(temporary) / "payload", __version__)
+
+
+def write_inventory(bundle):
+    import json
+    files = [{"path": path.relative_to(bundle).as_posix(), "size": path.stat().st_size,
+              "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+             for path in sorted(bundle.rglob("*")) if path.is_file() and path.name != INVENTORY]
+    data = {"schema_version": 1, "version": __version__, "files": files}
+    text = json.dumps(data, indent=2) + "\n"
+    parse_inventory(text)
+    (bundle / INVENTORY).write_text(text, encoding="utf-8")
 
 
 def add_licenses(bundle):
-    destination = bundle / "THIRD_PARTY_LICENSES"
+    destination = bundle / "DXVKUpdater-LICENSES"
     destination.mkdir(exist_ok=True)
     for package in ("customtkinter", "darkdetect", "packaging", "requests", "certifi", "charset-normalizer", "idna", "urllib3", "psutil", "pyinstaller"):
         distribution = importlib.metadata.distribution(package)
@@ -94,8 +109,9 @@ def main():
     subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", str(ROOT / "updater.spec")], cwd=ROOT, env=env, check=True)
     bundle = ROOT / "dist" / "ElDewritoDXVKUpdater"
     add_licenses(bundle)
-    shutil.copyfile(ROOT / "PLAYER_README.txt", bundle / "README.txt")
-    shutil.copyfile(ROOT / "LICENSE", bundle / "LICENSE.txt")
+    shutil.copyfile(ROOT / "PLAYER_README.txt", bundle / "DXVKUpdater-README.txt")
+    shutil.copyfile(ROOT / "LICENSE", bundle / "DXVKUpdater-LICENSE.txt")
+    write_inventory(bundle)
     archive = ROOT / "dist" / f"ElDewritoDXVKUpdater-{__version__}-windows-x64.zip"
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as output:
         for path in sorted(bundle.rglob("*")):
