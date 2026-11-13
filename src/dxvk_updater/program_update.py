@@ -117,6 +117,26 @@ def clone_runner(target, job):
     return runner / EXE
 
 
+def read_broker(copy):
+    safe_regular(copy, directory=True, missing=False)
+    safe_regular(copy / "broker.json", missing=False)
+    obj = read_json((copy / "broker.json").read_bytes())
+    if set(obj) != {"job_id", "target", "parent_pid", "parent_created"} or not isinstance(obj["job_id"], str) or not ID_PATTERN.fullmatch(obj["job_id"]):
+        raise UpdaterError("Invalid program restart record.")
+    target = obj["target"]
+    if not isinstance(target, str) or not Path(target).is_absolute() or str(Path(target).resolve()) != target:
+        raise UpdaterError("Invalid program restart destination.")
+    if type(obj["parent_pid"]) is not int or obj["parent_pid"] < 0 or type(obj["parent_created"]) not in (int, float) or not math.isfinite(obj["parent_created"]) or obj["parent_created"] < 0:
+        raise UpdaterError("Invalid program restart process.")
+    return obj
+
+
+def create_broker(copy, target, job_id, parent_pid, parent_created, source):
+    atomic_json(copy / "broker.json", {"job_id": job_id, "target": str(target),
+                                      "parent_pid": parent_pid, "parent_created": parent_created})
+    return clone_runner(source, copy)
+
+
 def stage_job(job, target, release, parent_pid, parent_created, client, emit, cancelled):
     data = {"id": job.name, "target": str(target), "parent_pid": parent_pid, "parent_created": parent_created,
             "release": release.to_dict(), "phase": "preparing", "worker_pid": 0, "worker_created": 0, "error": ""}
@@ -134,6 +154,8 @@ def stage_job(job, target, release, parent_pid, parent_created, client, emit, ca
         if cancelled():
             raise UpdaterError("Program update cancelled. Nothing was replaced.")
         extract_bundle(archive, job / "payload", release.version)
+        if cancelled():
+            raise UpdaterError("Program update cancelled. Nothing was replaced.")
         emit("Program verified; preparing safe replacement and restart…", 0.8)
     except Exception as exc:
         save_job(job, data, "failed", str(exc))
@@ -149,8 +171,24 @@ def prune_cache(cache, target):
         if not ID_PATTERN.fullmatch(job.name):
             continue
         try:
-            data = load_job(job)
-            if data["target"] != str(target) or data["phase"] not in {"committed", "rolled_back", "failed"} or worker_alive(job, data):
+            if (job / "broker.json").exists():
+                from .windows import admin_cache
+                data = read_broker(job)
+                if data["target"] != str(target) or process_alive(data["parent_pid"], data["parent_created"]):
+                    continue
+                secured = admin_cache() / data["job_id"]
+                data = load_job(secured) if secured.exists() else None
+                owner = secured
+            else:
+                data = load_job(job)
+                owner = job
+            if (target / MARKER).exists():
+                continue
+            if data and (data["target"] != str(target) or worker_alive(owner, data)):
+                continue
+            if data and data["phase"] not in {"committed", "rolled_back", "failed"} and not (
+                data["phase"] in {"preparing", "prepared"} and not process_alive(data["parent_pid"], data["parent_created"])
+            ):
                 continue
             runner = os.path.normcase(str(job / "runner" / EXE))
             active = False
@@ -174,7 +212,7 @@ def prune_cache(cache, target):
                     safe_regular(path, missing=False)
                     relative = path.relative_to(job).parts
                     if len(relative) == 1:
-                        if name not in {"job.json", "worker.json", "lock", "package.zip", "error.txt"} and not name.startswith(".writing-"):
+                        if name not in {"job.json", "broker.json", "worker.json", "lock", "package.zip", "error.txt"} and not name.startswith(".writing-"):
                             raise UpdaterError("Unexpected cache file; preserving the job.")
                     elif relative[0] not in {"runner", "payload", "backup"}:
                         raise UpdaterError("Unexpected cache directory; preserving the job.")
@@ -196,9 +234,11 @@ def writable(target):
     directories = {target} | {destination(target, row["path"]).parent for row in inventory["files"]}
     for directory in directories:
         try:
-            fd, name = tempfile.mkstemp(prefix="DXVKUpdater-write-test-", dir=directory)
-            os.close(fd)
-            Path(name).unlink()
+            probe = directory / ("DXVKUpdater-write-test-" + uuid.uuid4().hex)
+            # tempfile retries ACL denials on Windows as if they were name collisions.
+            with probe.open("xb"):
+                pass
+            probe.unlink()
         except PermissionError:
             return False
     return True
@@ -222,19 +262,24 @@ def prepare_update(release, emit=lambda text, fraction=None: None, cancelled=lam
     job.mkdir()
     parent, created = os.getpid(), psutil.Process().create_time()
     if not writable(target):
-        clone_runner(target, job)  # The restart broker keeps the original user's unelevated token.
+        create_broker(job, target, job_id, parent, created, target)
         emit("Waiting for administrator approval and verified program preparation…")
         windows.run_elevated(target / EXE, ["--program-prepare-admin", job_id, release.version, str(parent), str(created)])
         secured = windows.admin_cache() / job_id
         data = load_job(secured)
         if data["release"] != release.to_dict() or data["target"] != str(target):
             raise UpdaterError("The published program changed during preparation. Check again before updating.")
+        if cancelled():
+            cancel_prepared((job, secured))
+            raise UpdaterError("Program update cancelled. Nothing was replaced.")
+        emit(f"If normal startup fails, open this saved recovery helper: {job / 'runner' / EXE}")
         return job, secured
     client = program_client()
     try:
         stage_job(job, target, release, parent, created, client, emit, cancelled)
     finally:
         client.close()
+    emit(f"If normal startup fails, open this saved recovery helper: {job / 'runner' / EXE}")
     return job, job
 
 
@@ -250,8 +295,6 @@ def launch(executable, arguments):
 
 def handoff(prepared):
     broker, job = prepared
-    if broker == job:
-        spawn_helper(job)
     try:
         launch(broker / "runner" / EXE, ["--program-broker", job])
     except Exception as exc:
@@ -259,6 +302,20 @@ def handoff(prepared):
             data = load_job(job)
             save_job(job, data, "failed", "The restart broker could not start. " + str(exc))
         raise
+
+
+def cancel_prepared(prepared):
+    copy, job = prepared
+    with file_lock(copy / "lock", "Program preparation is still in use."):
+        data = load_job(job)
+        if (Path(data["target"]) / MARKER).exists() or worker_alive(job, data) or data["phase"] != "prepared":
+            raise UpdaterError("Program replacement has already started. Reopen the updater to finish recovery.")
+        if copy == job:
+            save_job(job, data, "failed", "Program update cancelled. Nothing was replaced.")
+        else:
+            reference = read_broker(copy)
+            if reference["job_id"] != job.name or reference["target"] != data["target"]:
+                raise UpdaterError("The restart record belongs to another program update.")
 
 
 def spawn_helper(job):
@@ -324,6 +381,60 @@ def staged_inventory(job, data):
         return parse_inventory(source.read(info))
 
 
+def publish_program_marker(target, job):
+    marker = target / MARKER
+    pointer = {"job_id": job.name, "admin": job.parent != user_cache()}
+    fd, name = tempfile.mkstemp(prefix="DXVKUpdater-pointer-", dir=target)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            json.dump(pointer, output)
+            output.flush()
+            os.fsync(output.fileno())
+        # Windows rename and POSIX hard-link creation both refuse an existing owner.
+        if os.name == "nt":
+            os.rename(temporary, marker)
+        else:
+            os.link(temporary, marker)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def finish_program_marker(job, data):
+    target = Path(data["target"])
+    marker = target / MARKER
+    safe_regular(marker)
+    if marker.exists():
+        marker_matches(target, job)
+        read_inventory(target, verify=True)
+        try:
+            marker.unlink()
+        except OSError as exc:
+            message = "Program replacement finished, but recovery-marker cleanup is pending. Close other updater windows and reopen. " + str(exc)
+            save_job(job, data, data["phase"], message)
+            raise UpdaterError(message) from exc
+
+
+def recover_prepared_marker(job, data, old):
+    target = Path(data["target"])
+    marker = target / MARKER
+    if read_inventory(job / "backup", verify=True) != old:
+        raise UpdaterError("The prepared program backup does not match the unchanged installation.")
+    raw = marker.read_bytes()
+    try:
+        marker_matches(target, job)
+    except UpdaterError:
+        expected = json.dumps({"job_id": job.name, "admin": job.parent != user_cache()}).encode("utf-8")
+        owner = expected.partition(b', "admin"')[0]
+        # A legacy partial pointer is recoverable only after its complete owner was written.
+        if not raw.startswith(owner) or not expected.startswith(raw):
+            raise UpdaterError("The recovery marker does not identify this prepared job. Keep the backup intact and use manual recovery.") from None
+        marker.unlink()
+        publish_program_marker(target, job)
+    save_job(job, data, "rolled_back")
+    finish_program_marker(job, data)
+
+
 def rollback_program(job, data):
     target = Path(data["target"])
     marker_matches(target, job)
@@ -340,7 +451,6 @@ def rollback_program(job, data):
     for name in sorted(new_names - old_names):
         destination(target, name).unlink(missing_ok=True)
     save_job(job, data, "rolled_back", data["error"])
-    (target / MARKER).unlink()
 
 
 def apply_update(job, wait_for_startup, *, wait_for_parent=wait_parent):
@@ -359,13 +469,11 @@ def _apply_update(job, wait_for_startup, wait_for_parent):
     wait_for_parent(data)
     data = load_job(job)
     if data["phase"] in {"committed", "rolled_back"}:
-        if (target / MARKER).exists():
-            marker_matches(target, job)
-            read_inventory(target, verify=True)
-            (target / MARKER).unlink()
+        finish_program_marker(job, data)
         return
     if data["phase"] in {"applying", "awaiting_startup", "recovery_required"}:
         rollback_program(job, data)
+        finish_program_marker(job, data)
         return
     if data["phase"] != "prepared":
         return
@@ -374,6 +482,9 @@ def _apply_update(job, wait_for_startup, wait_for_parent):
     old = read_inventory(target, verify=True)
     if old != read_inventory(job / "runner", verify=True):
         raise UpdaterError("The installed program changed after preparation. Check again before updating.")
+    if marker.exists():
+        recover_prepared_marker(job, data, old)
+        return
     new = read_inventory(job / "payload", verify=True)
     if new != staged_inventory(job, data) or new["version"] != data["release"]["version"]:
         raise UpdaterError("The staged program version changed.")
@@ -385,15 +496,13 @@ def _apply_update(job, wait_for_startup, wait_for_parent):
         if destination(target, name).exists():
             raise UpdaterError(f"An unrelated file occupies {name}. Move it before updating the program.")
     backup = job / "backup"
-    backup.mkdir()
+    safe_regular(backup, directory=True)
+    backup.mkdir(exist_ok=True)
     for name in sorted(old_names):
         atomic_copy(destination(target, name), destination(backup, name, create=True))
     read_inventory(backup, verify=True)
     read_inventory(target, verify=True)
-    with marker.open("x", encoding="utf-8") as output:
-        json.dump({"job_id": job.name, "admin": job.parent != user_cache()}, output)
-        output.flush()
-        os.fsync(output.fileno())
+    publish_program_marker(target, job)
     try:
         save_job(job, data, "applying")
         for name in sorted(new_names):
@@ -405,15 +514,22 @@ def _apply_update(job, wait_for_startup, wait_for_parent):
         if not wait_for_startup():
             raise UpdaterError("The new program did not confirm successful startup. Restoring the previous version.")
         save_job(job, data, "committed")
-        marker.unlink()
     except Exception as exc:
+        data = load_job(job)
+        if data["phase"] == "committed":
+            finish_program_marker(job, data)
+            return
         data["error"] = str(exc)[:2000]
         try:
             rollback_program(job, data)
         except Exception as recovery:
-            save_job(job, data, "recovery_required", str(exc) + " Close all updater windows and reopen to recover. " + str(recovery))
-            raise UpdaterError("Program recovery is pending. Keep the program-update cache intact and close other updater windows.") from recovery
+            data = load_job(job)
+            if data["phase"] != "rolled_back":
+                save_job(job, data, "recovery_required", str(exc) + " Close all updater windows and reopen to recover. " + str(recovery))
+                raise UpdaterError("Program recovery is pending. Keep the program-update cache intact and close other updater windows.") from recovery
+        finish_program_marker(job, data)
         raise UpdaterError("The program update failed; the previous version was restored. " + str(exc)) from exc
+    finish_program_marker(job, data)
 
 
 def trusted_job(path, *, applying=False):
@@ -482,6 +598,23 @@ def broker(job):
     raise UpdaterError("Program replacement has not finished. Keep the update cache intact and close other updater windows.")
 
 
+def saved_runner_job(executable):
+    copy = executable.parent.parent
+    if executable.parent.name != "runner" or copy.parent != user_cache() or not ID_PATTERN.fullmatch(copy.name):
+        return None
+    if (copy / "broker.json").exists():
+        from .windows import admin_cache
+        reference = read_broker(copy)
+        job = trusted_job(admin_cache() / reference["job_id"])
+        if load_job(job)["target"] != reference["target"]:
+            raise UpdaterError("The saved recovery helper belongs to another installation.")
+    else:
+        job = trusted_job(copy)
+    if not (Path(load_job(job)["target"]) / MARKER).exists():
+        raise UpdaterError("No interrupted program replacement needs recovery. Open the updater in its installation folder.")
+    return job
+
+
 def dispatch(arguments=None):
     """Handle helper modes before importing Tk or opening files in the target runtime."""
     args = list(sys.argv[1:] if arguments is None else arguments)
@@ -492,6 +625,10 @@ def dispatch(arguments=None):
         return None
     mode = args[0] if args else ""
     if not mode.startswith("--program-"):
+        saved = saved_runner_job(Path(sys.executable).resolve())
+        if saved:
+            broker(saved)
+            return 0
         target = Path(sys.executable).parent
         marker = target / MARKER
         if not marker.exists():
@@ -509,7 +646,8 @@ def dispatch(arguments=None):
             # An unelevated broker is required even when the replacement needs UAC.
             copy = user_cache() / uuid.uuid4().hex
             copy.mkdir()
-            clone_runner(job / "runner", copy)
+            import psutil
+            create_broker(copy, Path(data["target"]), job.name, os.getpid(), psutil.Process().create_time(), job / "runner")
             runner = copy / "runner" / EXE
         launch(runner, ["--program-broker", job])
         return 0
@@ -532,7 +670,6 @@ def dispatch(arguments=None):
                 stage_job(job, target, release, int(pid), float(created), client, lambda *a: None, lambda: False)
             finally:
                 client.close()
-            spawn_helper(job)
         elif mode == "--program-start-admin" and len(args) == 2:
             if not windows.elevated():
                 raise UpdaterError("Administrator recovery was not approved.")

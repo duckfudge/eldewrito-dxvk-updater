@@ -9,6 +9,8 @@ from pathlib import Path
 from .model import UpdaterError
 from .storage import safe_regular
 
+ADMIN_CACHE_SDDL = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)(A;OICI;RC;;;OW)"
+
 
 def libraries():
     return (ctypes.WinDLL("kernel32", use_last_error=True),
@@ -39,8 +41,7 @@ def admin_cache(*, create=False):
         raise UpdaterError("Could not locate Windows ProgramData.")
     root = Path(buffer.value)
     # Owner Rights removes the owner's implicit WRITE_DAC on inherited files.
-    text = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;BU)(A;OICI;RC;;;OW)"
-    sd = descriptor(advapi, text)
+    sd = descriptor(advapi, ADMIN_CACHE_SDDL)
     try:
         attributes = SecurityAttributes(ctypes.sizeof(SecurityAttributes), sd, False)
         kernel.CreateDirectoryW.argtypes = [w.LPCWSTR, ctypes.POINTER(SecurityAttributes)]
