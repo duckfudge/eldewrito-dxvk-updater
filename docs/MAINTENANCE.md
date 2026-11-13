@@ -101,12 +101,31 @@ revision until different contents appear; explicit installation remains availabl
   before importing Tk. Close other updater windows and retry. The broker can stop
   only its own newly started, unacknowledged child after a startup timeout so
   rollback can release file locks. It never kills the game or unrelated windows.
+- Unstartable installed runtime: open the saved 1.1.1+ helper with no arguments at
+  `%LOCALAPPDATA%\ElDewritoDXVKUpdater\program-updates\<job-id>\runner\ElDewritoDXVKUpdater.exe`.
+  The pre-handoff Details/log entry records the path. A normal cached job identifies
+  its target through `job.json`; an administrator restart copy uses `broker.json`
+  to identify its protected job. Recovery works offline without loading the target
+  runtime. Invalid/foreign markers and unverified backups are never guessed at.
+- Cleanup failures after commit/rollback retain the terminal state and retry
+  marker removal. Never roll back a committed program just to clear a marker.
+- First upgrade from 1.1.0: the old cloned helper performs this replacement, so
+  its recovery limitations still apply. Provide manual fresh-folder ZIP recovery.
+  Old broker directories without metadata cannot safely be associated with an
+  installation; automatic cleanup leaves those directories intact.
 - UAC staging: only the installed app requests elevation; it independently fetches
   the fixed program feed/ZIP. Protected staging restricts writes to administrators
   and system, allows user read/execute, and restricts implicit owner rights.
   Unsafe pre-existing cache permissions are refused. Preparation errors are saved
   as `error.txt` inside the protected job when available. Cached user-writable
   helpers are never elevated; an unelevated broker restarts the interface.
+  Cache descriptors use file-specific read/execute rights so verification matches
+  the access list Windows stores. Write probes make one exclusive attempt; using
+  tempfile here can retry an ACL denial hundreds of thousands of times on Windows.
+  Preparation does not start a replacement worker. Handoff starts the broker,
+  which may request a second UAC approval to start the protected worker. Closing
+  during preparation safely abandons that prepared job. An inactive abandoned
+  job with no recovery marker is collected on a later update.
 
 Rotating logs/settings are local under `%LOCALAPPDATA%/ElDewritoDXVKUpdater`.
 Completed program caches for an installation are collected before its next update;
