@@ -17,7 +17,7 @@ from dxvk_updater.model import version_tuple
 from scripts.build_windows import audit_archive
 from scripts.github_api import APIError, GitHub
 
-SUMMARY = "Program updates with approval; previous-patch restore, Undo restore, separate repair backups, and clearer patch information."
+SUMMARY = "More reliable interrupted program recovery, independent program checks, safer cancellation, and bounded helper-cache cleanup."
 
 
 def publish_program(api, program):
