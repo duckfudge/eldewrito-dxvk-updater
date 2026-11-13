@@ -144,3 +144,65 @@ def test_admin_dispatch_stages_without_launching_worker(staged, monkeypatch):
     monkeypatch.setattr(module, "spawn_helper", lambda *a: pytest.fail("No replacement before handoff"))
     assert module.dispatch(["--program-prepare-admin", "c" * 32, release.version, "0", "0"]) == 0
     assert len(calls) == 1
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Packaged Windows preparation boundary")
+def test_declined_preparation_never_starts_replacement(staged, monkeypatch):
+    copy, job, target = protected_copy(staged, monkeypatch)
+    before, protected_before = files(target), files(job)
+    monkeypatch.setattr(module.sys, "executable", str(target / EXE))
+    monkeypatch.setattr(module.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(windows, "elevated", lambda: False)
+    monkeypatch.setattr(module, "writable", lambda p: False)
+    monkeypatch.setattr(module, "prune_cache", lambda *a: None)
+    def denied(*args):
+        raise UpdaterError("Administrator approval was cancelled.")
+    monkeypatch.setattr(windows, "run_elevated", denied)
+    monkeypatch.setattr(module, "spawn_helper", lambda *a: pytest.fail("No worker after denial"))
+    monkeypatch.setattr(module, "launch", lambda *a: pytest.fail("No broker after denial"))
+    with pytest.raises(UpdaterError, match="approval was cancelled"):
+        module.prepare_update(staged[2])
+    assert files(target) == before
+    assert files(job) == protected_before
+
+
+def test_declined_replacement_uses_only_the_protected_runner(staged, monkeypatch):
+    _, job, target = protected_copy(staged, monkeypatch)
+    before, protected_before, requests = files(target), files(job), []
+    clock = [0]
+    monkeypatch.setattr(windows, "elevated", lambda: False)
+    monkeypatch.setattr(module, "worker_alive", lambda *a: False)
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    def sleep(seconds):
+        clock[0] += 1
+    monkeypatch.setattr(module.time, "sleep", sleep)
+    def denied(executable, arguments):
+        requests.append((executable, arguments))
+        raise UpdaterError("Administrator approval was cancelled.")
+    monkeypatch.setattr(windows, "run_elevated", denied)
+    monkeypatch.setattr(module, "launch", lambda *a: pytest.fail("No restart after denial"))
+    with pytest.raises(UpdaterError, match="approval was cancelled"):
+        module.broker(job)
+    assert requests == [(job / "runner" / EXE, ["--program-start-admin", job])]
+    assert files(target) == before
+    assert files(job) == protected_before
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Packaged Windows recovery dispatch")
+def test_protected_recovery_bootstrap_does_not_elevate_a_user_cache_copy(staged, monkeypatch):
+    _, job, target = protected_copy(staged, monkeypatch)
+    module.publish_program_marker(target, job)
+    before, calls = files(target), []
+    monkeypatch.setattr(module.sys, "executable", str(target / EXE))
+    monkeypatch.setattr(module.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(windows, "elevated", lambda: False)
+    monkeypatch.setattr(windows, "run_elevated", lambda *a: pytest.fail("Bootstrap must keep the user token"))
+    monkeypatch.setattr(module, "launch", lambda exe, args: calls.append((exe, args)))
+    assert module.dispatch([]) == 0
+    assert len(calls) == 1
+    executable, arguments = calls[0]
+    assert arguments == ["--program-broker", job]
+    copy = executable.parent.parent
+    assert copy.parent == module.user_cache()
+    assert module.read_broker(copy)["job_id"] == job.name
+    assert files(target) == before
