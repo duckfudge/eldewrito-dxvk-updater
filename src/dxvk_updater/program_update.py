@@ -575,17 +575,19 @@ def broker(job):
                 return
         if phase == "failed":
             raise UpdaterError(data["error"] or "Program preparation failed. No program files were replaced.")
-        if phase == "awaiting_startup" and not started:
+        active = worker_alive(job, data)
+        if phase == "awaiting_startup" and not started and active:
             child = launch(target / EXE, ["--program-health", job.name])
             started = True
             startup_deadline = time.monotonic() + 50
-        if phase == "awaiting_startup" and child and startup_deadline is not None and time.monotonic() >= startup_deadline:
+        if child and ((phase == "awaiting_startup" and startup_deadline is not None and time.monotonic() >= startup_deadline)
+                      or (not active and phase != "committed")):
             # Only terminate the unacknowledged child we created; never identify a victim by PID or name.
             if child.poll() is None:
                 child.terminate()
                 child.wait(timeout=5)
             child, startup_deadline = None, None
-        if time.monotonic() >= grace and not worker_alive(job, data):
+        if time.monotonic() >= grace and not active:
             if retried:
                 raise UpdaterError(data["error"] or "Program replacement stopped. Reopen the updater to recover.")
             retried = True
@@ -593,6 +595,8 @@ def broker(job):
                 spawn_helper(job)
             else:
                 windows.run_elevated(job / "runner" / EXE, ["--program-start-admin", job])
+            # UAC consent may wait longer than the replacement deadline.
+            deadline = time.monotonic() + 180
             grace = time.monotonic() + 3
         time.sleep(0.2)
     raise UpdaterError("Program replacement has not finished. Keep the update cache intact and close other updater windows.")
@@ -698,8 +702,11 @@ def dispatch(arguments=None):
             try:
                 job = trusted_job(args[1], applying=True)
                 data = load_job(job)
-                if data["phase"] == "prepared" and data["worker_pid"] == os.getpid():
-                    save_job(job, data, "failed", str(exc))
+                if data["worker_pid"] == os.getpid():
+                    if data["phase"] == "prepared":
+                        save_job(job, data, "failed", str(exc))
+                    elif data["phase"] in {"applying", "awaiting_startup", "recovery_required"}:
+                        save_job(job, data, "recovery_required", str(exc))
             except Exception:
                 pass
         return 1

@@ -52,6 +52,7 @@ licenses. Tests use synthetic files and never execute a game or contact GitHub.
 CI tests on Linux/Windows and builds the Windows package. Clean Windows 10/11
 without Python, actual DPI settings, and movement between monitors remain deferred
 release checks at the maintainer's request.
+Cross-account administrator credential testing is also deferred.
 
 ## Publishing
 
@@ -96,17 +97,19 @@ never elevates a user-writable cached helper. Keep `DXVKUpdater-update.json` and
 its matching update cache intact during recovery. Reopening resumes recovery.
 If the installed runtime cannot start, open the saved helper at
 `%LOCALAPPDATA%\ElDewritoDXVKUpdater\program-updates\<job-id>\runner\ElDewritoDXVKUpdater.exe`.
-Details/logs record that path before handoff. Starting a saved 1.1.1+ helper with
+Details/logs record that path before handoff. Starting a saved 1.1.2+ helper with
 no arguments recovers its pending installation offline, including UAC recovery.
 Administrator preparation and replacement may request approval separately;
 closing during preparation cancels before replacement starts. Completed and
 abandoned inactive caches for that installation are collected before its next update.
 Older unrecorded 1.1.0 broker copies are preserved because their target is unknown.
 
-Version 1.1.1 fixes interruption and final-cleanup errors in the program updater.
-An update from 1.1.0 still uses its older helper for that first replacement; manual
-ZIP extraction is the recovery route if it fails. Fresh 1.1.1 installations use
-the corrected helper on subsequent program updates.
+Version 1.1.2 recovers a stopped helper before starting an unstartable target,
+releases only its own unacknowledged startup child before retrying recovery, and
+allows time for replacement after UAC approval. Recovery errors stay in the journal.
+An update from 1.1.0 or 1.1.1 still uses its older helper for that first replacement;
+extract the latest ZIP into a fresh folder if recovery fails and retain the old
+folder/cache. Fresh 1.1.2 installations use the corrected helper on subsequent updates.
 
 HTTPS and hashes protect transport integrity; feeds are not independently signed.
 GitHub and publishing-secret access determine who can publish trusted updates.

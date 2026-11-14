@@ -69,8 +69,8 @@ install the first self-updating version once. Prefer a fresh folder. Never delet
 generic `_internal`, README, or license files from a mixed game directory because
 their ownership cannot be established. New runtime/documents use unique names.
 
-Clean Windows 10/11 guests without Python and actual DPI/multiple-monitor checks
-are deferred for 1.1.0 by the maintainer. Record that limitation in release notes;
+Clean Windows 10/11 guests without Python, actual DPI/multiple-monitor checks,
+and cross-account UAC tests are deferred by the maintainer. Record that limitation in release notes;
 package/runtime checks on a Python-equipped host do not replace those tests.
 The package remains unsigned.
 
@@ -99,9 +99,9 @@ revision until different contents appear; explicit installation remains availabl
 - Program recovery: retain `DXVKUpdater-update.json` and its UUID cache in
   LocalAppData or protected ProgramData. Reopening dispatches the saved runner
   before importing Tk. Close other updater windows and retry. The broker can stop
-  only its own newly started, unacknowledged child after a startup timeout so
-  rollback can release file locks. It never kills the game or unrelated windows.
-- Unstartable installed runtime: open the saved 1.1.1+ helper with no arguments at
+  only its own newly started, unacknowledged child after a startup timeout or a
+  stopped worker, freeing files for rollback. It never kills the game or unrelated windows.
+- Unstartable installed runtime: open the saved 1.1.2+ helper with no arguments at
   `%LOCALAPPDATA%\ElDewritoDXVKUpdater\program-updates\<job-id>\runner\ElDewritoDXVKUpdater.exe`.
   The pre-handoff Details/log entry records the path. A normal cached job identifies
   its target through `job.json`; an administrator restart copy uses `broker.json`
@@ -109,7 +109,7 @@ revision until different contents appear; explicit installation remains availabl
   runtime. Invalid/foreign markers and unverified backups are never guessed at.
 - Cleanup failures after commit/rollback retain the terminal state and retry
   marker removal. Never roll back a committed program just to clear a marker.
-- First upgrade from 1.1.0: the old cloned helper performs this replacement, so
+- First upgrade from 1.1.0/1.1.1: the old cloned helper performs this replacement, so
   its recovery limitations still apply. Provide manual fresh-folder ZIP recovery.
   Old broker directories without metadata cannot safely be associated with an
   installation; automatic cleanup leaves those directories intact.
@@ -126,6 +126,9 @@ revision until different contents appear; explicit installation remains availabl
   which may request a second UAC approval to start the protected worker. Closing
   during preparation safely abandons that prepared job. An inactive abandoned
   job with no recovery marker is collected on a later update.
+  Version 1.1.2 waits for an active worker before launching a startup probe and
+  restarts the replacement deadline after Windows consent. Recovery file-lock
+  errors are retained as `recovery_required`; keep the verified backup intact.
 
 Rotating logs/settings are local under `%LOCALAPPDATA%/ElDewritoDXVKUpdater`.
 Completed program caches for an installation are collected before its next update;
