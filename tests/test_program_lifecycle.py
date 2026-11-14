@@ -206,3 +206,143 @@ def test_protected_recovery_bootstrap_does_not_elevate_a_user_cache_copy(staged,
     assert copy.parent == module.user_cache()
     assert module.read_broker(copy)["job_id"] == job.name
     assert files(target) == before
+
+
+@pytest.mark.parametrize("protected", [False, True])
+def test_dead_startup_worker_recovers_before_launching_target(staged, monkeypatch, protected):
+    _, job, target = protected_copy(staged, monkeypatch) if protected else (staged[0], staged[0], staged[1])
+    before = files(target)
+    def crash():
+        raise SystemExit("interrupted worker")
+    with pytest.raises(SystemExit):
+        module.apply_update(job, crash)
+    (target / "_dxvk_updater/python313.dll").write_bytes(b"unstartable runtime")
+    clock, requests, launches = [0], [], []
+    monkeypatch.setattr(module, "trusted_job", lambda value: value)
+    monkeypatch.setattr(windows, "elevated", lambda: False)
+    monkeypatch.setattr(module, "worker_alive", lambda *a: False)
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(module.time, "sleep", lambda _: clock.__setitem__(0, clock[0] + 1))
+    def recover(*args):
+        requests.append(args)
+        module.apply_update(job, lambda: pytest.fail("Recovery must not run the broken target"))
+    monkeypatch.setattr(windows, "run_elevated", recover)
+    monkeypatch.setattr(module, "spawn_helper", recover)
+    def launch(executable, arguments):
+        assert arguments == [], "The broken runtime must not be started before recovery"
+        assert files(target) == before
+        launches.append(executable)
+    monkeypatch.setattr(module, "launch", launch)
+    module.broker(job)
+    assert len(requests) == 1
+    assert launches == [target / EXE]
+    assert module.load_job(job)["phase"] == "rolled_back"
+
+
+@pytest.mark.parametrize("protected", [False, True])
+def test_dead_worker_releases_only_its_unacknowledged_child_before_retry(staged, monkeypatch, protected):
+    _, job, target = protected_copy(staged, monkeypatch) if protected else (staged[0], staged[0], staged[1])
+    data = module.load_job(job)
+    data["phase"] = "awaiting_startup"
+    clock, active, stopped, launches = [0], [True], [], []
+    class Child:
+        def poll(self):
+            return None
+        def terminate(self):
+            stopped.append(True)
+        def wait(self, timeout):
+            assert timeout == 5
+    def launch(executable, arguments):
+        launches.append(arguments)
+        if arguments:
+            active[0] = False
+        return Child()
+    def recover(*args):
+        assert stopped == [True], "The owned child must release the executable before rollback"
+        data["phase"] = "rolled_back"
+    monkeypatch.setattr(module, "trusted_job", lambda value: value)
+    monkeypatch.setattr(module, "load_job", lambda value: data)
+    monkeypatch.setattr(windows, "elevated", lambda: False)
+    monkeypatch.setattr(module, "worker_alive", lambda *a: active[0])
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(module.time, "sleep", lambda _: clock.__setitem__(0, clock[0] + 1))
+    monkeypatch.setattr(module, "launch", launch)
+    monkeypatch.setattr(windows, "run_elevated", recover)
+    monkeypatch.setattr(module, "spawn_helper", recover)
+    module.broker(job)
+    assert launches == [["--program-health", job.name], []]
+    assert stopped == [True]
+
+
+def test_uac_wait_does_not_consume_broker_work_deadline(staged, monkeypatch):
+    _, job, target = protected_copy(staged, monkeypatch)
+    data = module.load_job(job)
+    clock, active, launches = [0], [False], []
+    def approved(*args):
+        clock[0] += 600
+        active[0] = True
+        data["phase"] = "awaiting_startup"
+    def launch(executable, arguments):
+        launches.append(arguments)
+        data["phase"] = "committed"
+        return SimpleNamespace(poll=lambda: None)
+    monkeypatch.setattr(module, "trusted_job", lambda value: value)
+    monkeypatch.setattr(module, "load_job", lambda value: data)
+    monkeypatch.setattr(windows, "elevated", lambda: False)
+    monkeypatch.setattr(module, "worker_alive", lambda *a: active[0])
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(module.time, "sleep", lambda _: clock.__setitem__(0, clock[0] + 1))
+    monkeypatch.setattr(module, "launch", launch)
+    monkeypatch.setattr(windows, "run_elevated", approved)
+    module.broker(job)
+    assert launches == [["--program-health", job.name]]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Packaged Windows recovery dispatch")
+def test_recovery_dispatch_records_a_locked_destination(staged, monkeypatch):
+    job, _, _ = staged
+    def crash():
+        raise SystemExit("interrupted worker")
+    with pytest.raises(SystemExit):
+        module.apply_update(job, crash)
+    def locked(*args):
+        raise PermissionError("QA locked destination")
+    closed = []
+    monkeypatch.setattr(module.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(module.sys, "executable", str(job / "runner" / EXE))
+    monkeypatch.setattr(windows, "elevated", lambda: False)
+    monkeypatch.setattr(windows, "health_event", lambda *a: "test event")
+    monkeypatch.setattr(windows, "close_handle", closed.append)
+    monkeypatch.setattr(module, "rollback_program", locked)
+    assert module.dispatch(["--program-apply", str(job)]) == 1
+    data = module.load_job(job)
+    assert data["phase"] == "recovery_required"
+    assert "QA locked destination" in data["error"]
+    assert closed == ["test event"]
+
+
+def test_committed_startup_child_survives_helper_cleanup_retry(staged, monkeypatch):
+    job, _, _ = staged
+    module.publish_program_marker(Path(module.load_job(job)["target"]), job)
+    data = module.load_job(job)
+    data["phase"] = "awaiting_startup"
+    clock, launches = [0], []
+    class Child:
+        def poll(self):
+            return None
+        def terminate(self):
+            pytest.fail("A durably committed app must remain open during marker cleanup")
+    def launch(executable, arguments):
+        launches.append(arguments)
+        data["phase"] = "committed"
+        return Child()
+    monkeypatch.setattr(module, "trusted_job", lambda value: value)
+    monkeypatch.setattr(module, "load_job", lambda value: data)
+    monkeypatch.setattr(windows, "elevated", lambda: False)
+    monkeypatch.setattr(module, "worker_alive", lambda *a: data["phase"] != "committed")
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(module.time, "sleep", lambda _: clock.__setitem__(0, clock[0] + 1))
+    monkeypatch.setattr(module, "launch", launch)
+    monkeypatch.setattr(module, "spawn_helper", lambda _: (Path(data["target"]) / module.MARKER).unlink())
+    module.broker(job)
+    assert launches == [["--program-health", job.name]]
