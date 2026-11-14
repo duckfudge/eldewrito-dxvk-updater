@@ -17,7 +17,7 @@ from dxvk_updater.model import version_tuple
 from scripts.build_windows import audit_archive
 from scripts.github_api import APIError, GitHub
 
-SUMMARY = "More reliable interrupted program recovery, independent program checks, safer cancellation, and bounded helper-cache cleanup."
+SUMMARY = "Recover interrupted updates before starting the target runtime, allow time for UAC approval, and retain recovery errors in the journal."
 
 
 def publish_program(api, program):
@@ -84,7 +84,8 @@ def publish_release(api, directory):
                     "This release is the updater application; DXVK patch releases remain separate.\n\n"
                     + SUMMARY + "\n\nVersion 1.0.x users must install this ZIP manually once. Future program updates are offered inside the app. "
                     "Extract to a fresh folder; the new runtime is _dxvk_updater. Mixed game folders are supported.\n\n"
-                    "Clean Windows 10/11 VM and actual Windows DPI tests are deferred. The package is unsigned.\n\n"
+                    "The first update from 1.1.0/1.1.1 uses its existing helper. If recovery fails, extract this ZIP into a fresh folder and retain the old cache.\n\n"
+                    "Clean Windows 10/11 VM, actual Windows DPI, and cross-account UAC tests are deferred. The package is unsigned.\n\n"
                     f"[Updater source at {source[:12]}](https://github.com/duckfudge/eldewrito-dxvk-updater/tree/{source})")
     try:
         release = api.call("GET", f"{base}/tags/{tag}")
