@@ -1,4 +1,4 @@
-ELDEWRITO DXVK UPDATER 1.1.2
+ELDEWRITO DXVK UPDATER 1.1.3
 
 1. Extract the whole ZIP. Keep _dxvk_updater beside ElDewritoDXVKUpdater.exe.
 2. Run the executable. Python is bundled.
@@ -52,6 +52,7 @@ If it fails, extract the latest ZIP manually to a fresh folder and keep the old
 folder/cache. The corrected helper is available after that first update completes.
 
 Downloads/source links: https://github.com/duckfudge/eldewrito-dxvk
-Supports Windows 10/11 x64. Clean VM/actual Windows DPI tests remain deferred.
-Cross-account administrator credential testing also remains deferred.
+Targets Windows 10/11 x64. The window fit at 100%, 150%, and 175% on Windows 11.
+Clean guest tests were skipped. Native 200%, mixed display scaling, cross-account
+UAC, and stable-game gameplay with the published patch remain unverified.
 Third-party license texts are included in DXVKUpdater-LICENSES.
