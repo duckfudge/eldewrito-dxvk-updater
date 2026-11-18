@@ -59,6 +59,29 @@ def test_offline_restore_clears_stale_installed_details():
     assert app.file_list.options["text"] == ""
 
 
+@pytest.mark.parametrize("undo", [False, True])
+def test_offline_restore_reports_the_completed_action(monkeypatch, game, client, manifest, undo):
+    engine = module.Installer(game, client, game_guard=lambda root: None)
+    engine.install(manifest)
+    if undo:
+        engine.restore()
+    app = ui(None)
+    app.game, app.local_status = game, engine.check()
+    app.emit = lambda *args: None
+    app._run = lambda operation, work: app.events.put(("done", (operation, work())))
+    monkeypatch.setattr(module, "Installer", lambda *args: engine)
+    confirmations = []
+    monkeypatch.setattr(module.messagebox, "askyesno", lambda title, *args, **kwargs: confirmations.append(title) or True)
+
+    App.restore(app)
+    App._poll(app)
+
+    assert confirmations == ["Undo restore?" if undo else "Restore the previous patch?"]
+    assert app.badge.options["text"] == ("RESTORE UNDONE" if undo else "RESTORE COMPLETE")
+    assert app.progress_text.options["text"] == "Restored from local backup"
+    assert app.restore_button.options["text"] == ("Restore previous update" if undo else "Undo restore")
+
+
 def test_damaged_dll_is_offered_as_repair(game, client, manifest):
     from dxvk_updater.engine import Installer
     engine = Installer(game, client, game_guard=lambda root: None)
@@ -94,6 +117,17 @@ def test_text_wraps_to_narrower_body():
     assert app.headline.options["wraplength"] == 540
     assert app.summary.options["wraplength"] == 540
     assert app.folder_label.options["wraplength"] == 360
+
+
+def test_live_dpi_change_refits_to_current_monitor(monkeypatch):
+    monkeypatch.setattr(module, "window_work_size", lambda hwnd: (1920, 1008) if hwnd == 37 else None)
+    sizes = {}
+    app = SimpleNamespace(_get_window_scaling=lambda: 1.5, winfo_id=lambda: 37,
+                          winfo_width=lambda: 2400, winfo_height=lambda: 1500,
+                          geometry=lambda value: sizes.update(geometry=value),
+                          minsize=lambda w, h: sizes.update(minimum=(w, h)))
+    App._fit_window(app, on_dpi_change=True)
+    assert sizes == {"geometry": "1240x592", "minimum": (900, 592)}
 
 
 def test_offline_known_restore_point_remains_available(manifest):
@@ -253,4 +287,6 @@ def test_feed_errors_keep_independent_results(monkeypatch, game, manifest, faile
         assert app.manifest is None and app.status == local
         App.later(app)
         assert app.repair_button.options["state"] == "disabled"
+        assert app.later_button.options["state"] == "disabled"
+        assert app.progress_text.options["text"] == "Patch feed unavailable"
     assert app.restore_button.options["state"] == "normal"
