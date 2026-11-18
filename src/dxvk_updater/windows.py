@@ -12,6 +12,22 @@ from .storage import safe_regular
 ADMIN_CACHE_SDDL = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)(A;OICI;RC;;;OW)"
 
 
+def window_work_size(hwnd):
+    class MonitorInfo(ctypes.Structure):
+        _fields_ = [("size", w.DWORD), ("monitor", w.RECT), ("work", w.RECT), ("flags", w.DWORD)]
+
+    user = ctypes.WinDLL("user32")
+    user.MonitorFromWindow.argtypes = [w.HWND, w.DWORD]
+    user.MonitorFromWindow.restype = w.HMONITOR
+    user.GetMonitorInfoW.argtypes = [w.HMONITOR, ctypes.POINTER(MonitorInfo)]
+    user.GetMonitorInfoW.restype = w.BOOL
+    info = MonitorInfo(size=ctypes.sizeof(MonitorInfo))
+    monitor = user.MonitorFromWindow(hwnd, 2)  # MONITOR_DEFAULTTONEAREST
+    if monitor and user.GetMonitorInfoW(monitor, ctypes.byref(info)):
+        return info.work.right - info.work.left, info.work.bottom - info.work.top
+    return None
+
+
 def libraries():
     return (ctypes.WinDLL("kernel32", use_last_error=True),
             ctypes.WinDLL("advapi32", use_last_error=True),

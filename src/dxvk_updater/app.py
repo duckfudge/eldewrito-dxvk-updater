@@ -5,6 +5,7 @@ import argparse
 import logging
 import logging.handlers
 import queue
+import sys
 import threading
 import tkinter as tk
 import webbrowser
@@ -21,6 +22,7 @@ from .model import FILES, RELEASES_URL, UpdaterError
 from .network import FeedClient
 from .settings import remember_game, settings_directory, suggested_game
 from .program_update import fetch_program, prepare_update, handoff, cancel_prepared
+from .windows import window_work_size
 
 BG = "#0B1018"
 PANEL = "#111B28"
@@ -167,12 +169,26 @@ class App(ctk.CTk):
         body.bind("<Configure>", lambda event: self._wrap_text(event.width / body._get_widget_scaling()))
         self._buttons()
 
-    def _fit_window(self):
+    def _fit_window(self, *, on_dpi_change=False):
         scale = self._get_window_scaling()
-        width = min(1060, int(self.winfo_screenwidth() / scale) - 40)
-        height = min(760, int(self.winfo_screenheight() / scale) - 80)
-        self.geometry(f"{width}x{height}+20+20")
-        self.minsize(min(900, width), min(600, height))
+        work_size = window_work_size(self.winfo_id()) if on_dpi_change else None
+        screen_width, screen_height = work_size or (self.winfo_screenwidth(), self.winfo_screenheight())
+        max_width = max(1, int(screen_width / scale) - 40)
+        max_height = max(1, int(screen_height / scale) - 80)
+        min_width, min_height = min(900, max_width), min(600, max_height)
+        width = int(self.winfo_width() / scale) if on_dpi_change else 1060
+        height = int(self.winfo_height() / scale) if on_dpi_change else 760
+        width = min(max_width, max(min_width, width))
+        height = min(max_height, max(min_height, height))
+        self.minsize(min_width, min_height)
+        position = "" if on_dpi_change else "+20+20"
+        self.geometry(f"{width}x{height}{position}")
+
+    def _set_scaled_min_max(self):
+        super()._set_scaled_min_max()
+        if sys.platform == "win32" and self.state() == "normal":
+            # Refit after CustomTkinter releases its temporary bounds for the DPI transition.
+            self._fit_window(on_dpi_change=True)
 
     def _wrap_text(self, width):
         self.headline.configure(wraplength=max(180, width - 40))
@@ -201,12 +217,13 @@ class App(ctk.CTk):
             button.configure(state="normal" if available else "disabled")
         ready = available and self.game is not None and self.manifest is not None
         program = self._program_offered()
-        self.update_button.configure(state="normal" if available and program or ready and self.status and self.status.kind != "current" else "disabled")
+        offered = available and program or ready and self.status and self.status.kind != "current"
+        self.update_button.configure(state="normal" if offered else "disabled")
         self.repair_button.configure(state="normal" if ready and not program else "disabled")
         restore = self.status or self.local_status
         self.restore_button.configure(state="normal" if available and self.game and restore and restore.can_restore else "disabled",
                                       text="Undo restore" if restore and restore.undo_restore else "Restore previous update")
-        self.later_button.configure(state="normal" if available else "disabled")
+        self.later_button.configure(state="normal" if offered else "disabled")
 
     def _program_offered(self):
         return bool(self.program and self.program.newer() and not self.program_deferred)
@@ -275,10 +292,13 @@ class App(ctk.CTk):
                             self.installed_value.configure(text="Restored locally")
                             self.installed_date.configure(text="Check again for published status")
                             self.file_list.configure(text="")
-                        if operation == "restore":
-                            self.badge.configure(text="RESTORE COMPLETE", text_color=GREEN)
-                            self.headline.configure(text="Your previous files are back")
-                            self.summary.configure(text="The selected backup has been restored. The reverted patch stays optional; Undo restore can reverse this action.")
+                        if operation in ("restore", "undo_restore"):
+                            undone = operation == "undo_restore"
+                            self.badge.configure(text="RESTORE UNDONE" if undone else "RESTORE COMPLETE", text_color=GREEN)
+                            self.headline.configure(text="Your patch is back" if undone else "Your previous files are back")
+                            self.summary.configure(text="The files from before the restore are active again." if undone else
+                                                   "The reverted patch stays optional. Undo restore can reverse this action.")
+                            self.progress_text.configure(text="Restored from local backup")
                         self.progress.set(1)
                     self._buttons()
                     if self.closing:
@@ -319,6 +339,7 @@ class App(ctk.CTk):
         manifest, status = self.manifest, self.status
         self.available_value.configure(text=manifest.title if manifest else "Unavailable")
         self.available_date.configure(text=f"{manifest.patch_id[:10]} · {manifest.published_at[:10]}" if manifest else "Check again to reconnect")
+        self.progress_text.configure(text="Checked just now · GitHub" if manifest else "Patch feed unavailable")
         if status and status.installed:
             self.installed_value.configure(text=status.installed.title)
             self.installed_date.configure(text=f"{status.installed.patch_id[:10]} · {status.installed.published_at[:10]}")
@@ -362,7 +383,6 @@ class App(ctk.CTk):
         files = [f for f in manifest.files if f.name in names] if manifest else []
         self.file_list.configure(text="  ·  ".join(f.name for f in files) + (f"\n{human_size(sum(f.size for f in files))} download" if files else ""))
         self.update_button.configure(text="Install anyway" if status and status.suppressed else "Install patch" if status and not status.installed else "Repair patch files" if status and status.kind == "repair" else "Update now")
-        self.progress_text.configure(text="Checked just now · GitHub")
 
     def choose_folder(self):
         chosen = filedialog.askdirectory(parent=self, title="Select the folder containing eldorado.exe",
@@ -462,7 +482,8 @@ class App(ctk.CTk):
     def restore(self):
         if not self.game:
             return
-        undo = bool(self.status and self.status.undo_restore)
+        status = self.status or self.local_status
+        undo = bool(status and status.undo_restore)
         if not messagebox.askyesno("Undo restore?" if undo else "Restore the previous patch?", "Restore the saved file state? Your current affected files will be backed up so this action can be undone. Repairs retain a separate backup.", parent=self):
             return
         game, manifest = self.game, self.manifest
@@ -470,7 +491,7 @@ class App(ctk.CTk):
             engine = Installer(game, None, self.emit)
             engine.restore()
             return engine.check(manifest)
-        self._run("restore", work)
+        self._run("undo_restore" if undo else "restore", work)
 
     def later(self):
         if self._program_offered():
