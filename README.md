@@ -49,10 +49,11 @@ ZIP and checksum appear in `dist/`. All dependencies are pinned. No new runtime
 dependency is needed for self-updating. `--game-dir "C:\Games\Halo Online"`
 selects a folder explicitly. Source is [0BSD](LICENSE); dependencies retain their
 licenses. Tests use synthetic files and never execute a game or contact GitHub.
-CI tests on Linux/Windows and builds the Windows package. Clean Windows 10/11
-without Python, actual DPI settings, and movement between monitors remain deferred
-release checks at the maintainer's request.
-Cross-account administrator credential testing is also deferred.
+CI tests on Linux and Windows and builds the Windows package. On a Windows 11
+host, the updater passed patch install, repair, restore, and undo on a copy of
+stable ElDewrito 0.7.1, and the window fit at native 100%, 150%, and 175% scaling.
+Clean Windows 10/11 guest tests were skipped. Native 200%, mixed display scaling,
+cross-account UAC, and gameplay with the published patch remain unverified.
 
 ## Publishing
 
@@ -109,7 +110,7 @@ releases only its own unacknowledged startup child before retrying recovery, and
 allows time for replacement after UAC approval. Recovery errors stay in the journal.
 An update from 1.1.0 or 1.1.1 still uses its older helper for that first replacement;
 extract the latest ZIP into a fresh folder if recovery fails and retain the old
-folder/cache. Fresh 1.1.2 installations use the corrected helper on subsequent updates.
+folder/cache. Fresh installations of 1.1.2 or later use the corrected helper on subsequent updates.
 
 HTTPS and hashes protect transport integrity; feeds are not independently signed.
 GitHub and publishing-secret access determine who can publish trusted updates.
