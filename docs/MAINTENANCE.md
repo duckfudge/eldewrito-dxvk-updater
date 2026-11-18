@@ -69,9 +69,10 @@ install the first self-updating version once. Prefer a fresh folder. Never delet
 generic `_internal`, README, or license files from a mixed game directory because
 their ownership cannot be established. New runtime/documents use unique names.
 
-Clean Windows 10/11 guests without Python, actual DPI/multiple-monitor checks,
-and cross-account UAC tests are deferred by the maintainer. Record that limitation in release notes;
-package/runtime checks on a Python-equipped host do not replace those tests.
+For 1.1.3, the Windows 11 host window fit at native 100%, 150%, and 175% scaling.
+Clean Windows 10/11 guest tests were skipped. Native 200%, mixed display scaling,
+cross-account UAC, and gameplay with the published patch remain unverified.
+Keep release notes aligned with the checks actually performed.
 The package remains unsigned.
 
 ## Revert a patch
